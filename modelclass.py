@@ -181,7 +181,7 @@ class PatientFlow:
         self.scenario = scenario
         self.event_log = event_log
         self.start_datetime = start_datetime
-        self.arrival = -np.inf
+        self.arrival = -np.inf # Output state 
         self.total_time = -np.inf
         # Wait metrics (default NaN if not computed)
         self.triage_wait = np.nan
@@ -191,7 +191,13 @@ class PatientFlow:
         self.medsurg_wait = np.nan
 
     def process(self, triage_store, ed_store, icu_store, medsurg_store):
+
+        # ====================================================
         # 1. Arrival and Triage Phase
+        # ====================================================
+
+
+        #Arrival 
         self.arrival = self.env.now
         self.event_log.append({
             'patient': self.pid,
@@ -201,6 +207,7 @@ class PatientFlow:
             'time': self.env.now,
             'resource_id': 0
         })
+
         # Record triage wait start time
         triage_wait_start = self.env.now
         self.event_log.append({
@@ -210,6 +217,8 @@ class PatientFlow:
             'event': 'triage_wait_begins',
             'time': self.env.now
         })
+
+        # Computes Triage Resource times
         triage_resource = yield triage_store.get()
         self.triage_wait = self.env.now - triage_wait_start  # Compute triage wait time
         self.event_log.append({
@@ -220,6 +229,8 @@ class PatientFlow:
             'time': self.env.now,
             'resource_id': triage_resource.id_attribute
         })
+
+        #Probability Distribution
         triage_duration = self.scenario.triage_dist.sample()
         yield self.env.timeout(triage_duration)
         self.event_log.append({
@@ -233,7 +244,10 @@ class PatientFlow:
         })
         triage_store.put(triage_resource)
 
+        # ====================================================
         # 2. Registration & Examination Phase (Non-Trauma Only)
+        # ====================================================
+
         if not self.scenario.icu_prob_dist.sample():
             # Registration Phase
             registration_wait_start = self.env.now
@@ -300,7 +314,11 @@ class PatientFlow:
             self.scenario.exam.put(exam_resource)
         # If trauma, additional events could be logged here.
 
+
+        # ====================================================
         # 3. ED Stay Phase (Common to All)
+        # ====================================================
+
         self.event_log.append({
             'patient': self.pid,
             'pathway': 'Unified',
@@ -330,7 +348,10 @@ class PatientFlow:
         })
         ed_store.put(ed_resource)
 
+        # ====================================================
         # 4. Decision Phase – ICU / MedSurg / Direct Discharge
+        # ====================================================
+
         if self.scenario.icu_prob_dist.sample():
             # Record ICU wait start time
             icu_wait_start = self.env.now
@@ -424,7 +445,10 @@ class PatientFlow:
                 'time': self.env.now
             })
 
+        # ====================================================
         # 5. Discharge
+        # ====================================================
+
         self.event_log.append({
             'patient': self.pid,
             'pathway': 'Unified',
@@ -493,6 +517,8 @@ class WardFlowModel:
             self.utilisation_audit.append(record)
             yield self.env.timeout(interval)
 
+
+    # Iterates 
     def arrivals_generator(self):
         for pid in itertools.count(1):
             if self.env.now >= self.scenario.simulation_time:
@@ -503,6 +529,11 @@ class WardFlowModel:
             patient = PatientFlow(pid, self.env, self.scenario, self.event_log, self.start_datetime)
             self.patients.append(patient)
             self.env.process(patient.execute(self.triage, self.ed_beds, self.icu_beds, self.medsurg_beds))
+
+            #Somewhhere in this script we generate an action
+            #Woukd it also be possible to poop out a state? I.e the the throughput, the average waiting time, etc.
+            
+            
 
     def run(self, results_collection_period):
         # Start the utilisation audit process.
