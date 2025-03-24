@@ -137,7 +137,7 @@ with tab2:
     )
 
 with tab1:
-    col1, col2, col3, col4, col5, col6 = st.columns(6)
+    col1, col2 = st.columns(2)
 
     with col1:
         st.subheader("Triage")
@@ -148,15 +148,24 @@ with tab1:
         TRIAGE_MEAN = st.slider("Triage Mean", 1, 100, step=1, value=3)
         
 
-    with col2:
-        st.subheader("Resource Counts ED")
-        NUM_ED_BEDS = st.slider("number of ED beds", 1, 10, step=1, value=6)
-        ED_STAY_MEAN = st.slider("ED stay Mean", 1, 300, step=1, value=3)
-        
 
+        
+    with col2:
+        st.subheader("Patient Check")
+        REGISTER_RESOURCE = st.slider("number of REGISTRATION room resources", 1, 10, step=1, value=6)
+        REGISTER_RESOURCE_MEAN = st.slider("Reg Mean", 1, 100, step=1, value=8)
+        REGISTER_RESOURCE_VAR = st.slider("Reg Var", 1, 100, step=1, value=2)
+        
+        #Patient Check
+        EXAM_RESOURCE = st.slider("number of EXAMINATION room resources", 1, 10, step=1, value=6)
+        EXAM_RESOURCE_MEAN = st.slider("Exam Mean", 1, 100, step=1, value=16)
+        EXAM_RESOURCE_VAR = st.slider("Exam Var", 1, 100, step=1, value=3)
+
+
+    col3, col4, col5  = st.columns(3)
 
     with col3:
-        st.subheader("Resource Counts ICU")
+        st.subheader("Rsrcs ICU")
         NUM_ICU_BEDS = st.slider("number of ICU beds", 1, 10, step=1, value=6)
         ICU_STAY_MEAN = st.slider("ICU stay Mean", 1, 300, step=1, value=3)
         # Probability that a patient needs ICU after ED:
@@ -166,27 +175,22 @@ with tab1:
         ICU_PROB_MEAN=st.slider("Prob ICU",0, 100, step=1, value=30)
 
     with col4: 
-        st.subheader("Resource Counts MEDSURGE")
+        st.subheader("Rsrcs MEDSURGE")
         NUM_MEDSURG_BEDS = st.slider("number of MEDSURGE beds", 1, 10, step=1, value=6)
         MEDSURGE_STAY_MEAN = st.slider("Medsurge stay Mean", 1, 300, step=1, value=3)
         PROB_MEDSURGE=st.slider("Prob MEDSURGE",0.0, 1.0, step=0.01, value=0.5)
 
-    with col5: 
-        st.subheader("Patient Check")
-        EXAM_RESOURCE = st.slider("number of EXAMINATION room resources", 1, 10, step=1, value=6)
-        EXAM_RESOURCE_MEAN = st.slider("Exam Mean", 1, 100, step=1, value=16)
-        EXAM_RESOURCE_VAR = st.slider("Exam Var", 1, 100, step=1, value=3)
+    with col5:
+        st.subheader("Rsrcs ED")
+        NUM_ED_BEDS = st.slider("number of ED beds", 1, 10, step=1, value=6)
+        ED_STAY_MEAN = st.slider("ED stay Mean", 1, 300, step=1, value=3)
 
+    
+
+    col6, col7 = st.columns(2)
     with col6:
-        st.subheader("")
-        REGISTER_RESOURCE = st.slider("number of REGISTRATION room resources", 1, 10, step=1, value=6)
-        REGISTER_RESOURCE_MEAN = st.slider("Reg Mean", 1, 100, step=1, value=8)
-        REGISTER_RESOURCE_VAR = st.slider("Reg Var", 1, 100, step=1, value=2)
-
-    col7, col8 = st.columns(2)
-    with col7:
         st.write("Total beds in use is {}".format(NUM_ED_BEDS+NUM_ICU_BEDS+NUM_MEDSURG_BEDS+NUM_TRIAGE))
-    with col8:
+    with col7:
         with st.expander("Advanced Parameters"):
             seed = st.slider("🎲 Set a random number for the computer to start from",
                             1, 1000,
