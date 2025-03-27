@@ -139,104 +139,80 @@ with tab2:
 with tab1:
     col1, col2 = st.columns(2)
 
+    # Column 1: Triage / ED parameters
     with col1:
-        st.subheader("Triage")
-        NUM_TRIAGE = st.slider("👨‍⚕️👩‍⚕️ Number of Triage Cubicles", 1, 10, step=1, value=4)
-        prob_trauma = st.slider("🚑 Probability that a new arrival is a trauma patient",
-                                0.0, 1.0, step=0.01, value=0.3,
-                                help="0 = No arrivals are trauma patients\n\n1 = All arrivals are trauma patients")
-        TRIAGE_MEAN = st.slider("Triage Mean", 1, 100, step=1, value=3)
-        
+        st.subheader("Triage & ED")
 
+        NUM_TRIAGE = st.slider("👨‍⚕️ Triage Bays", 1, 10, step=1, value=4)
+        TRIAGE_MEAN = st.slider("Triage Mean (minutes)", 1, 180, step=1, value=10)
 
-        
+        NUM_ED_BEDS = st.slider("🛏️ ED Beds", 1, 20, step=1, value=6)
+        ED_EVAL_MEAN = st.slider("ED Evaluation Mean (minutes)", 1, 300, step=1, value=60)
+
+        st.write("Configure other ED-based times below if desired.")
+        DISCHARGE_DELAY_MEAN = st.slider("Discharge Delay Mean (minutes)", 1, 120, step=1, value=15)
+
+    # Column 2: ICU / MedSurg parameters
     with col2:
-        st.subheader("Patient Check")
-        REGISTER_RESOURCE = st.slider("number of REGISTRATION room resources", 1, 10, step=1, value=6)
-        REGISTER_RESOURCE_MEAN = st.slider("Reg Mean", 1, 100, step=1, value=8)
-        REGISTER_RESOURCE_VAR = st.slider("Reg Var", 1, 100, step=1, value=2)
-        
-        #Patient Check
-        EXAM_RESOURCE = st.slider("number of EXAMINATION room resources", 1, 10, step=1, value=6)
-        EXAM_RESOURCE_MEAN = st.slider("Exam Mean", 1, 100, step=1, value=16)
-        EXAM_RESOURCE_VAR = st.slider("Exam Var", 1, 100, step=1, value=3)
+        st.subheader("ICU & MedSurg")
 
+        NUM_ICU_BEDS = st.slider("ICU Beds", 1, 10, step=1, value=2)
+        ICU_STAY_MEAN = st.slider("ICU Stay Mean (minutes)", 10, 1440, step=10, value=360)
+        PROB_ICU = st.slider("Probability of ICU Transfer", 0.0, 1.0, step=0.01, value=0.3)
+        PROB_ICU_PROCEDURE = st.slider("Probability ICU Procedure", 0.0, 1.0, step=0.01, value=0.5)
+        ICU_PROC_MEAN = st.slider("ICU Procedure Mean (minutes)", 1, 120, step=1, value=30)
 
-    col3, col4, col5  = st.columns(3)
+        NUM_MEDSURG_BEDS = st.slider("MedSurg Beds", 1, 10, step=1, value=4)
+        MEDSURG_STAY_MEAN = st.slider("MedSurg Stay Mean (minutes)", 10, 1440, step=10, value=240)
+        PROB_MEDSURG = st.slider("Probability MedSurg Transfer", 0.0, 1.0, step=0.01, value=0.5)
 
-    with col3:
-        st.subheader("Rsrcs ICU")
-        NUM_ICU_BEDS = st.slider("number of ICU beds", 1, 10, step=1, value=6)
-        ICU_STAY_MEAN = st.slider("ICU stay Mean", 1, 300, step=1, value=3)
-        # Probability that a patient needs ICU after ED:
-        PROB_ICU=st.slider("Prob ICU",0.0, 1.0, step=0.01, value=0.50)
-        # Example: Additional optional procedure in ICU:
-        PROB_ICU_PROCEDURE=st.slider("Prob ICU PROCEDURE",0.0, 1.0, step=0.01, value=0.5)
-        ICU_PROB_MEAN=st.slider("Prob ICU",0, 100, step=1, value=30)
+    st.markdown("---")
 
-    with col4: 
-        st.subheader("Rsrcs MEDSURGE")
-        NUM_MEDSURG_BEDS = st.slider("number of MEDSURGE beds", 1, 10, step=1, value=6)
-        MEDSURGE_STAY_MEAN = st.slider("Medsurge stay Mean", 1, 300, step=1, value=3)
-        PROB_MEDSURGE=st.slider("Prob MEDSURGE",0.0, 1.0, step=0.01, value=0.5)
+    # Nurse + Advanced
+    colN, colAdv = st.columns([1, 1])
+    with colN:
+        st.subheader("Nurse Parameters")
+        DAY_SHIFT_NURSES = st.slider("Day Shift Nurses", 1, 30, step=1, value=10)
+        NIGHT_SHIFT_NURSES = st.slider("Night Shift Nurses", 1, 30, step=1, value=5)
+        SHIFT_LENGTH = st.slider("Shift Length (hours)", 1, 24, step=1, value=12)
 
-    with col5:
-        st.subheader("Rsrcs ED")
-        NUM_ED_BEDS = st.slider("number of ED beds", 1, 10, step=1, value=6)
-        ED_STAY_MEAN = st.slider("ED stay Mean", 1, 300, step=1, value=3)
+    with colAdv:
+        st.subheader("Advanced/Global")
+        seed = st.slider("🎲 Random Seed", 1, 1000, step=1, value=42)
+        n_reps = st.slider("🔁 Simulation Replications", 1, 10, step=1, value=3)
+        run_time_days = st.slider("🗓️ Simulation Duration (days)", 1, 60, step=1, value=5)
 
-    
-
-    col6, col7 = st.columns(2)
-    with col6:
-        st.write("Total beds in use is {}".format(NUM_ED_BEDS+NUM_ICU_BEDS+NUM_MEDSURG_BEDS+NUM_TRIAGE))
-    with col7:
-        with st.expander("Advanced Parameters"):
-            seed = st.slider("🎲 Set a random number for the computer to start from",
-                            1, 1000,
-                            step=1, value=42)
-
-            n_reps = st.slider("🔁 How many times should the simulation run? WARNING: Fast/modern computer required to take this above 5 replications.",
-                            1, 10,
-                            step=1, value=3)
-
-            run_time_days = st.slider("🗓️ How many days should we run the simulation for each time?",
-                        1, 60,
-                        step=1, value=5)
-
+    # Build scenario object from the above
     args = Scenario(
-        simulation_time=7*24*60,
-        random_number_set=seed,
-        #Rsrcs
+        simulation_time = run_time_days * 24 * 60,
+        random_number_set = seed,
+
+        # Basic resources
         n_triage = NUM_TRIAGE,
-        n_ed_beds=NUM_ED_BEDS,
-        n_icu_beds=NUM_ICU_BEDS,
-        n_medsurg_beds=NUM_MEDSURG_BEDS,
+        n_ed_beds = NUM_ED_BEDS,
+        n_icu_beds = NUM_ICU_BEDS,
+        n_medsurg_beds = NUM_MEDSURG_BEDS,
 
-        #Sty Prbs
-        triage_mean=TRIAGE_MEAN,
-        ed_stay_mean=ED_STAY_MEAN,
-        icu_stay_mean=ICU_STAY_MEAN,
-        medsurg_stay_mean=MEDSURGE_STAY_MEAN,
+        # Service time means
+        triage_mean = TRIAGE_MEAN,
+        ed_eval_mean = ED_EVAL_MEAN,
+        icu_stay_mean = ICU_STAY_MEAN,
+        medsurg_stay_mean = MEDSURG_STAY_MEAN,
+        discharge_delay_mean = DISCHARGE_DELAY_MEAN,
+        icu_proc_mean = ICU_PROC_MEAN,
 
-        #Wrd Probs
-        p_icu=PROB_ICU,
-        p_medsurg=PROB_MEDSURGE,
-        p_icu_procedure=PROB_ICU_PROCEDURE,
-        icu_proc_mean=ICU_PROB_MEAN,
+        # Probabilities
+        p_icu = PROB_ICU,
+        p_medsurg = PROB_MEDSURG,
+        p_icu_procedure = PROB_ICU_PROCEDURE,
 
-        #Reg & Exam
-        n_reg=REGISTER_RESOURCE,
-        n_exam=EXAM_RESOURCE,
+        # Nurse shift parameters
+        day_shift_nurses = DAY_SHIFT_NURSES,
+        night_shift_nurses = NIGHT_SHIFT_NURSES,
+        shift_length = SHIFT_LENGTH,
 
-        reg_mean=REGISTER_RESOURCE_MEAN,
-        reg_var=REGISTER_RESOURCE_VAR,
-
-        exam_mean=EXAM_RESOURCE_MEAN,
-        exam_var=EXAM_RESOURCE_VAR,
-
-
-        model="3-ward-flow"
+        # For reference
+        model = "simplified-ed-flow"
     )
 
     # A user must press a streamlit button to run the model
