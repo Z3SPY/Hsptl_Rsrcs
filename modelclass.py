@@ -480,8 +480,8 @@ class WardFlowModel:
         self.env.run(until=rc_period)
         
         # At episode end, cancel all background processes so no pending events remain
-        for proc in self.background_processes:
-            proc.interrupt("Episode ended")
+        #for proc in self.background_processes:
+        #    proc.interrupt("Episode ended")
         
         # Run a tiny bit more to process the cancellations
         self.env.run(until=self.env.now + 0.001)

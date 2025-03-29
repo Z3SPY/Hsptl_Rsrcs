@@ -52,6 +52,9 @@ class HospitalEnv(gym.Env):
         # Set current shift (default to 'day')
         self.current_shift = 'day'
 
+        # Add cost
+        self.nurse_change_cost = 0.0
+
 
     def reset(self):
         # Initialize a new simulation episode
@@ -124,37 +127,56 @@ class HospitalEnv(gym.Env):
                 self.model.env.process(self._reallocate_bed(self.model.icu, self.model.medsurg))
             self.current_icu_beds -= beds_to_move
             self.current_medsurg_beds += beds_to_move
+
+
         elif action == 5:
-            # Add one nurse to current shift
+            # Add one nurse to current shift, with a cost
             if self.current_shift == 'day' and self.current_day_nurses < self.total_nurses:
                 self.current_day_nurses += 1
+                self.nurse_change_cost += 1.0  # cost for adding one nurse
             elif self.current_shift == 'night' and self.current_night_nurses < self.total_nurses:
                 self.current_night_nurses += 1
-            # Instead of modifying capacity directly, compute new capacity and recreate the resource
+                self.nurse_change_cost += 1.0
             new_capacity = self.model.nurses.capacity + 1
             self.model.nurses = simpy.PreemptiveResource(self.model.env, capacity=new_capacity)
 
         elif action == 6:
-            # Remove one nurse from current shift (ensure at least one remains)
+            # Remove one nurse from current shift, with a (smaller) cost or benefit
             if self.current_shift == 'day' and self.current_day_nurses > 1:
                 self.current_day_nurses -= 1
+                self.nurse_change_cost += 0.5  # cost for removing a nurse (could be lower)
             elif self.current_shift == 'night' and self.current_night_nurses > 1:
                 self.current_night_nurses -= 1
-            # Use max() to ensure new capacity is at least 1
+                self.nurse_change_cost += 0.5
             new_capacity = max(1, self.model.nurses.capacity - 1)
             self.model.nurses = simpy.PreemptiveResource(self.model.env, capacity=new_capacity)
-        
 
         elif action == 7:
-            # Add two nurses to current shift
+            # Add two nurses, each with a cost
             for _ in range(2):
                 if self.current_shift == 'day' and self.current_day_nurses < self.total_nurses:
                     self.current_day_nurses += 1
+                    self.nurse_change_cost += 1.0
                     new_capacity = self.model.nurses.capacity + 1
                     self.model.nurses = simpy.PreemptiveResource(self.model.env, capacity=new_capacity)
                 elif self.current_shift == 'night' and self.current_night_nurses < self.total_nurses:
                     self.current_night_nurses += 1
+                    self.nurse_change_cost += 1.0
                     new_capacity = self.model.nurses.capacity + 1
+                    self.model.nurses = simpy.PreemptiveResource(self.model.env, capacity=new_capacity)
+
+        elif action == 8:
+            # Remove two nurses, each with a cost (or lower cost)
+            for _ in range(2):
+                if self.current_shift == 'day' and self.current_day_nurses > 1:
+                    self.current_day_nurses -= 1
+                    self.nurse_change_cost += 0.5
+                    new_capacity = max(1, self.model.nurses.capacity - 1)
+                    self.model.nurses = simpy.PreemptiveResource(self.model.env, capacity=new_capacity)
+                elif self.current_shift == 'night' and self.current_night_nurses > 1:
+                    self.current_night_nurses -= 1
+                    self.nurse_change_cost += 0.5
+                    new_capacity = max(1, self.model.nurses.capacity - 1)
                     self.model.nurses = simpy.PreemptiveResource(self.model.env, capacity=new_capacity)
 
         elif action == 8:
@@ -252,13 +274,8 @@ class HospitalEnv(gym.Env):
         return obs
 
     def _compute_reward(self):
-        """
-        Computes a reward that gives a positive signal when the system operates near target levels,
-        and subtracts penalties when resources are overutilized or deviate from MSO recommendations.
-        """
-        # Baseline reward per time step
         R_base = 10.0
-        
+
         # Example congestion penalty calculations:
         ed_util_ratio = self.model.ed.count / self.scenario.n_ed_beds
         icu_free = len(self.model.icu.items)
@@ -286,11 +303,20 @@ class HospitalEnv(gym.Env):
         nurses_available = self.model.nurses.capacity - self.model.nurses.count
         nurse_bonus = max(0, (nurses_available / self.model.nurses.capacity) - 0.3)
 
-        # Placeholder overwork penalty (to be refined with proper nurse shift logic)
+        # Overwork penalty (if applicable)
         overwork_penalty = 0.0
 
-        total_reward = R_base - (congestion_penalty + deviation_penalty) + nurse_bonus - overwork_penalty
+        # Incorporate nurse change cost penalty:
+        nurse_change_cost_weight = 2.0
+        nurse_change_penalty = nurse_change_cost_weight * self.nurse_change_cost
+
+        total_reward = R_base - (congestion_penalty + deviation_penalty) + nurse_bonus - overwork_penalty - nurse_change_penalty
+
+        # Reset nurse change cost after using it in reward (or accumulate per episode as desired)
+        self.nurse_change_cost = 0.0
+
         return total_reward
+
 
     def _snapshot_state(self):
         # Create a snapshot of the current state for use by the MSO planner
