@@ -6,7 +6,7 @@ from Agent import HybridAgent
 
 # Define simulation parameters (tune as needed)
 scenario = Scenario(
-    simulation_time=288 * 7,  # 1 day in minutes
+    simulation_time= 120 * 60,  # 1 day in minutes
     random_number_set=42,
     n_triage=10,
     n_ed_beds=10,
@@ -28,7 +28,7 @@ mean_medsurg_stay = getattr(scenario, 'medsurg_stay_mean', 6*60)
 mso_planner = HospitalMSOPlanner(total_beds, p_icu, p_medsurg, mean_icu_stay, mean_medsurg_stay, horizon_hours=8)
 
 # Create environment: toggle MSO usage via use_mso flag
-use_mso = False  
+use_mso = True  
 env = HospitalEnv(scenario, mso_planner if use_mso else None, mso_frequency_hours=8)
 
 # Initialize the DRL agent
