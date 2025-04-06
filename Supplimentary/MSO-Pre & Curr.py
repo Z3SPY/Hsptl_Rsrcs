@@ -218,8 +218,8 @@ class DQNAgent:
 def run_mso_pretrain_acrobot(
     episodes=500,
     pretrain_steps=2000,
-    depth=3, branching=3,
-    batch_size=64,
+    depth=5, branching=5,
+    batch_size=64,  
     plot_results=True
 ):
     """
@@ -376,20 +376,20 @@ def compare_two_runs():
     """
     # 1) Offline MSO Pretraining
     rewards_pretrain = run_mso_pretrain_acrobot(
-        episodes=300,
+        episodes=500,
         pretrain_steps=1000,
-        depth=2,
-        branching=2,
+        depth=7,
+        branching=5,
         batch_size=64,
         plot_results=False
     )
 
     # 2) Curriculum MSO
     rewards_curriculum = run_mso_curriculum_acrobot(
-        episodes=300,
+        episodes=500,
         mso_episodes=50,
-        depth=2,
-        branching=2,
+        depth=7,
+        branching=5,
         batch_size=64,
         plot_results=False
     )

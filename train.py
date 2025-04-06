@@ -23,18 +23,18 @@ def run_training_mcts_vs_mso(
     print("===============================")
 
     scenario = Scenario(
-        simulation_time=120 * 60,
+        simulation_time= 60 * 60 * 4,  # 4 hours in seconds
         random_number_set=42,
-        n_triage=2,
+        n_triage=4,
         n_ed_beds=4,
         n_icu_beds=4,
-        n_medsurg_beds=2
+        n_medsurg_beds=4
     )
 
     # Define a fresh environment maker for planners using SimPlannerEnv
     def env_maker():
-        s = Scenario(simulation_time=120*60, random_number_set=999,
-                     n_triage=2, n_ed_beds=4, n_icu_beds=4, n_medsurg_beds=2)
+        s = Scenario(simulation_time=60 * 60 * 3, random_number_set=999,
+                     n_triage=4, n_ed_beds=4, n_icu_beds=4, n_medsurg_beds=4)
         return SimPlannerEnv(s)  # ✅ SWITCHED to SimPlannerEnv
 
     # 1) Temporary env to get PPO policy
@@ -58,19 +58,29 @@ def run_training_mcts_vs_mso(
 
     if use_mcts:
         planner = MCTSMPCPlanner(env_maker, value_model,
-                                 depth=3, branching=3, discount=0.99)
+                                depth=3, branching=5, discount=0.99,
+                                use_value_bootstrap=True,
+                                exploration_weight=1.0)
     else:
-        planner = HospitalMSOPlanner(env_maker, value_model,
-                                     depth=3, branching=3, discount=0.99)
+        planner = HospitalMSOPlanner(env_maker, value_model)
 
     # 5) Final env with planner attached
     train_env = HospitalEnv(
         scenario=scenario,
+        max_icu=24,
+        max_medsurg=24,
+        max_nurse_shift=3,
+        # MSO integration
         use_mso=True,
         mso_planner=planner,
         mso_frequency_hours=mso_frequency_hours,
+        # Simulation step control
+        step_minutes=60,
+        # Logging toggles, if needed
         debug_logs=debug_logs
     )
+
+    
 
     # 6) Curriculum toggle
     if use_curriculum:

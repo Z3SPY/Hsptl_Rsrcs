@@ -177,3 +177,5 @@ cython_debug/
 models/
 videos/
 __pycache__/
+unused/
+.vscode/

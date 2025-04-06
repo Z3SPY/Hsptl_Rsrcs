@@ -7,6 +7,7 @@ import torch.optim as optim
 from collections import deque
 import random
 from copy import deepcopy
+import matplotlib.pyplot as plt
 
 # Q-network definition
 class QNetwork(nn.Module):
@@ -172,7 +173,18 @@ def train(env_name="Acrobot-v1", episodes=800):
             print(f"Episode {ep}, Avg Reward: {avg:.2f}, Epsilon: {agent.epsilon:.3f}")
 
     env.close()
+
+
+
+    plt.figure()
+    plt.plot(rewards)
+    plt.title(f"MSO Curriculum (first {ep} episodes) for Acrobot")
+    plt.xlabel("Episode")
+    plt.ylabel("Total Reward")
+    plt.show() 
+
     return rewards
+
 
 if __name__ == "__main__":
     train()

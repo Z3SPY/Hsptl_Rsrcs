@@ -5,6 +5,7 @@ from collections import deque
 import torch
 import torch.nn as nn
 import torch.optim as optim
+import matplotlib.pyplot as plt
 
 # Set device to CUDA if available
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -109,7 +110,7 @@ def train():
     action_dim = env.action_space.n
     
     # Hyperparameters
-    num_episodes = 800
+    num_episodes = 500
     batch_size = 64
     gamma = 0.99
     replay_buffer_capacity = 10000
@@ -162,6 +163,15 @@ def train():
         
         episode_rewards.append(episode_reward)
         print(f"Episode {episode:03d} | Reward: {episode_reward:3.1f} | Epsilon: {epsilon:.3f}")
+
+
+
+    plt.figure()
+    plt.plot(episode_rewards)
+    plt.title(f"MSO Curriculum (first {episode} episodes) for Acrobot")
+    plt.xlabel("Episode")
+    plt.ylabel("Total Reward")
+    plt.show() 
     
     # Save the trained model
     torch.save(model.state_dict(), "dqn_acrobot.pth")

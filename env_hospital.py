@@ -7,7 +7,7 @@ import gym
 from gym import spaces
 
 # Import your scenario and model from modelclass
-from modelclass import Scenario, WardFlowModel, Patient
+from modelclass import Scenario, WardFlowModel, PatientFlow
 
 ###################################################
 # MultiDiscrete Action Wrapper
@@ -67,8 +67,8 @@ class HospitalEnv(gym.Env):
     def __init__(self,
                  scenario: Scenario,
                  # max for multi-discrete
-                 max_icu=5,
-                 max_medsurg=5,
+                 max_icu=24,
+                 max_medsurg=24,
                  max_nurse_shift=3,
                  # MSO integration
                  use_mso=False,
@@ -150,6 +150,7 @@ class HospitalEnv(gym.Env):
 
         obs = self._get_obs() 
 
+        print("[DEBUG] Resetting environment")
         if isinstance(obs, np.ndarray):
             print(f"[DEBUG] Reset obs shape: {obs.shape}")
         else:
@@ -315,10 +316,10 @@ class HospitalEnv(gym.Env):
         }
 
     def restore_state(self, snap):
-        """
-        Rebuild the environment from the snapshot dictionary.
-        This is used instead of a heavy `deepcopy(self)`.
-        """
+        
+        #Rebuild the environment from the snapshot dictionary.
+        #This is used instead of a heavy `deepcopy(self)`.
+        
         self.model.env._now = snap["sim_time"]
         self.current_icu_beds = snap["icu_beds"]
         self.current_medsurg_beds = snap["med_beds"]
@@ -330,7 +331,7 @@ class HospitalEnv(gym.Env):
         # Rebuild patients
         self.model.patients = []
         for data in snap["patients"]:
-            self.model.patients.append(Patient.from_dict(data))
+            self.model.patients.append(PatientFlow.from_dict(data))
 
         # If you also want to restore store items for ICU or MedSurg, do that here:
         # e.g., self.model.icu.items = snapshot["icu_items"]
@@ -346,7 +347,7 @@ class HospitalEnv(gym.Env):
 ###################################################
 if __name__ == "__main__":
     from modelclass import Scenario
-    scenario = Scenario(simulation_time=24*60, n_icu_beds=4, n_medsurg_beds=4)
+    scenario = Scenario(simulation_time= 60 * 60 * 24, n_icu_beds=4, n_medsurg_beds=4)
     env = HospitalEnv(scenario, max_icu=4, max_medsurg=4, max_nurse_shift=3, debug_logs=True)
     obs = env.reset()
 
