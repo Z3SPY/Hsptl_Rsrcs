@@ -21,6 +21,25 @@ from math import sqrt
 import math
 import random
 
+
+
+
+
+class DynamicPreemptiveResource(simpy.PreemptiveResource):
+    @property
+    def capacity(self):
+        # Return the internal capacity stored in _capacity.
+        return self._capacity
+
+    @capacity.setter
+    def capacity(self, new_capacity):
+        # Optionally, add a safety check here:
+        if new_capacity < self.count:
+            raise ValueError("New capacity cannot be less than current active usage.")
+        # Update the internal capacity
+        self._capacity = new_capacity
+
+
 ###########################################
 # DISTRIBUTION CLASSES
 ###########################################
@@ -275,10 +294,10 @@ class Scenario:
     def __init__(self,
                  simulation_time=7*24*60,
                  random_number_set=42,
-                 n_triage=2,
-                 n_ed_beds=4,
-                 n_icu_beds=2,
-                 n_medsurg_beds=4,
+                 n_triage=10,
+                 n_ed_beds=32,
+                 n_icu_beds=32,
+                 n_medsurg_beds=32,
 
                  triage_mean=10.0,
                  ed_eval_mean=60.0,
@@ -366,6 +385,8 @@ class Scenario:
 ###########################################
 # WARD FLOW MODEL
 ###########################################
+HOURLY_ARRIVAL_RATES = [1, 1, 1, 1, 2, 4, 6, 8, 10, 9, 8, 7, 7, 6, 6, 5, 4, 3, 2, 2, 1, 1, 1, 1]        
+    
 class WardFlowModel:
     """
     Manages the simulation environment, resources, nurse scheduling,
@@ -381,13 +402,13 @@ class WardFlowModel:
         self.patients = []
         self.patient_count = 0
 
-        # Start background process list
-        self.background_processes = []
-        
+
+        # NEW: Set up the hourly arrival profile.
+        self.hourly_arrival_profile = HOURLY_ARRIVAL_RATES
 
         # Triage & ED as PreemptiveResource
-        self.triage = simpy.PreemptiveResource(self.env, capacity=self.scenario.n_triage)
-        self.ed = simpy.PreemptiveResource(self.env, capacity=self.scenario.n_ed_beds)
+        self.triage = DynamicPreemptiveResource(self.env, capacity=self.scenario.n_triage)
+        self.ed = DynamicPreemptiveResource(self.env, capacity=self.scenario.n_ed_beds)
 
         # ICU & MedSurg as simple Stores
         self.icu = simpy.Store(self.env)
@@ -398,15 +419,75 @@ class WardFlowModel:
             self.medsurg.put(f"MedSurg_Bed_{i+1}")
 
         # Nurse resource
-        self.nurses = simpy.PreemptiveResource(self.env, capacity=self.scenario.day_shift_nurses)
+        self.nurses = DynamicPreemptiveResource(self.env, capacity=self.scenario.day_shift_nurses)
+
+        # Start background process list
+        self.background_processes = []
+
+
+    #######################################
+    # NEW: Helper Functions for Time-Based Arrivals
+    #######################################
+    def get_current_hour(self):
+        """
+        Returns the current simulation hour as an integer between 0 and 23.
+        Assumes self.env.now is in minutes.
+        """
+        return int((self.env.now // 60) % 24)
+
+    def sample_time_aware_interarrival(self):
+        """
+        Samples an interarrival time (in minutes) based on the current hour's arrival rate.
+        Uses an exponential distribution where the mean is 60 divided by the arrival rate.
+        """
+        current_hour = self.get_current_hour()
+        base_rate = self.hourly_arrival_profile[current_hour]
+        if base_rate <= 0:
+            # If no patients are expected this hour, return a very long interarrival time.
+            return 9999  
+        mean_interval = 60 / base_rate  # Mean time between arrivals in minutes
+
+        iat = np.random.exponential(mean_interval)
+        print(f"[DEBUG] At hour {current_hour}, base rate = {base_rate}, sampled IAT = {iat:.2f} minutes")
+        return np.random.exponential(mean_interval)
+
+    def arrivals_generator(self):
+        """
+        Generates patients with time-varying interarrival times based on an hourly profile.
+        """
+        for pid in itertools.count(1):
+            if self.env.now >= self.scenario.simulation_time:
+                break
+            # Sample the interarrival time using the time-aware function.
+            iat = self.sample_time_aware_interarrival()
+            yield self.env.timeout(iat)
+            
+            severity = np.random.randint(low=1, high=4)
+            p = PatientFlow(pid, self.env, self.scenario, self.event_log, self.start_datetime, severity)
+            self.patients.append(p)
+            self.env.process(p.execute(self.triage, self.ed, self.icu, self.medsurg, self.nurses))
+            
+            self.event_log.append({
+                'patient': pid,
+                'severity': severity,
+                'event_type': 'arrival_departure',
+                'event': 'arrival',
+                'time': self.env.now
+            })
+
+
+
+
 
     def nurse_shift_scheduler(self):
         while True:
             # Day shift
-            self.nurses = simpy.PreemptiveResource(self.env, capacity=self.scenario.day_shift_nurses)            
+            self.nurses = DynamicPreemptiveResource(self.env, capacity=self.scenario.day_shift_nurses) 
+            print(f"[DEBUG] Day shift started at {self.env.now}, nurse capacity set to {self.scenario.day_shift_nurses}.")           
             yield self.env.timeout(self.scenario.shift_length * 60)
             # Night shift
-            self.nurses = simpy.PreemptiveResource(self.env, capacity=self.scenario.night_shift_nurses)   
+            self.nurses = DynamicPreemptiveResource(self.env, capacity=self.scenario.night_shift_nurses)
+            print(f"[DEBUG] Day shift started at {self.env.now}, nurse capacity set to {self.scenario.night_shift_nurses}.")              
             yield self.env.timeout(self.scenario.shift_length * 60)
             
             # Log shift change
@@ -447,52 +528,8 @@ class WardFlowModel:
             }
             self.utilisation_audit.append(record)
 
-            print(f"Utilisation audit at {self.env.now} minutes: {record}")
+            #print(f"Utilisation audit at {self.env.now} minutes: {record}")
             yield self.env.timeout(interval)
-
-    def arrivals_generator(self):
-        """
-        Generate patients with random arrivals. 
-        For each patient, we create a PatientFlow object and run its process in parallel.
-        """
-        rng = np.random.default_rng(self.scenario.random_number_set + math.floor(random.random() * 1000) )
-        for pid in itertools.count(1):
-            if self.env.now >= self.scenario.simulation_time:
-                break
-            base_iat = 5.0  # base mean, you can do dynamic
-            iat = rng.exponential(base_iat)
-            yield self.env.timeout(iat)
-
-            severity = rng.integers(low=1, high=4)
-            p = PatientFlow(pid, self.env, self.scenario, self.event_log, self.start_datetime, severity)
-            self.patients.append(p)
-            self.env.process(p.execute(self.triage, self.ed, self.icu, self.medsurg, self.nurses))
-
-            #print(f"Patient {pid} arrived at {self.env.now} minutes with severity {severity}")
-            self.event_log.append({
-                'patient': pid,
-                'severity': severity,
-                'event_type': 'arrival_departure',
-                'event': 'arrival',
-                'time': self.env.now
-            })
-            """
-            self.patient_count += 1
-            if self.patient_count % 100 == 0:
-                print(f"Total patients processed: {self.patient_count}")
-                self.event_log.append({
-                    'event_type': 'patient_count',
-                    'time': self.env.now,
-                    'total_patients': self.patient_count
-                })
-            print("All patients generated.")
-            self.event_log.append({
-                'event_type': 'simulation_end',
-                'time': self.env.now,
-                'total_patients': self.patient_count
-            })
-            self.env.process(self.arrivals_generator())
-            """
 
     def run(self, rc_period):
         # Ensure simulation runs at least a tiny step
@@ -519,14 +556,11 @@ class WardFlowModel:
 ###########################################
 class PatientFlow:
     """
-    Multi-phase ED approach with priority queueing. 
-    Steps:
-      1) Triage
-      2) Nurse Evaluation
-      3) ED evaluation
-      4) Optional imaging
-      5) Decision: ICU, MedSurg, or discharge
-      6) Final discharge
+    Enhanced PatientFlow process including:
+      - Transfer conditions with boarding.
+      - Expected LOS and LOS deviation calculation.
+      - Nurse throughput effect.
+      - Failure escalation if boarding time exceeds threshold.
     """
     def __init__(self, pid, env, scenario, event_log, start_datetime, severity):
         self.pid = pid
@@ -534,15 +568,25 @@ class PatientFlow:
         self.scenario = scenario
         self.event_log = event_log
         self.start_datetime = start_datetime
-        self.severity = severity
+        self.severity = severity  # e.g. 1 = critical, 3 = low priority
+        
         self.arrival = -np.inf
         self.total_time = -np.inf
         self.triage_wait = np.nan
         self.icu_wait = np.nan
         self.medsurg_wait = np.nan
+        self.expected_LOS = None  # Expected length-of-stay (to be set upon transfer)
+        self.complication = False  # [CHANGE] New: flag for failure escalation
+
+    def get_nurse_effect(self, nurse):
+        # [CHANGE] Compute a nurse effect: if nurse capacity is low relative to a baseline, service times increase.
+        baseline = 10  # Example baseline nurse capacity
+        current = nurse.capacity if nurse.capacity > 0 else 1
+        effect = max(1.0, baseline / current)
+        return effect
 
     def process(self, triage, ed, icu, medsurg, nurse):
-        # 0) Arrival
+        # ----- 0. Arrival -----
         self.arrival = self.env.now
         self.event_log.append({
             'patient': self.pid,
@@ -552,74 +596,117 @@ class PatientFlow:
             'time': self.env.now
         })
 
-        # 1) Triage
+        # ----- 1. Triage with Nurse Assistance -----
         triage_wait_start = self.env.now
         with triage.request(priority=self.severity, preempt=False) as req:
             yield req
             self.triage_wait = self.env.now - triage_wait_start
-            triage_time = self.scenario.triage_dist.sample()
+            base_triage_time = self.scenario.triage_dist.sample()
+            # Nurse influence: if nurse pool is under pressure, triage takes longer.
+            nurse_effect = self.get_nurse_effect(nurse)  # [CHANGE] Nurse throughput factor
+            triage_time = base_triage_time * nurse_effect
             yield self.env.timeout(triage_time)
 
-        # 2) Nurse Evaluation
+        # ----- 2. Nurse Evaluation (using nurse pool tokens) -----
         with nurse.request(priority=self.severity, preempt=False) as req:
             yield req
-            nurse_eval_time = np.random.exponential(5)
+            base_nurse_eval = np.random.exponential(5)
+            nurse_eval_time = base_nurse_eval * nurse_effect  # [CHANGE] Scale nurse eval time
             yield self.env.timeout(nurse_eval_time)
 
-        # 3) ED evaluation
+        # ----- 3. ED Evaluation -----
         ed_wait_start = self.env.now
         with ed.request(priority=self.severity, preempt=False) as req:
             yield req
-            ed_eval_time = self.scenario.ed_eval_dist.sample()
+            base_ed_eval = self.scenario.ed_eval_dist.sample()
+            ed_eval_time = base_ed_eval * nurse_effect
             yield self.env.timeout(ed_eval_time)
+            ed_wait = self.env.now - ed_wait_start
+            self.event_log.append({
+                'patient': self.pid,
+                'event_type': 'ed_eval',
+                'event': 'completed',
+                'time': self.env.now,
+                'wait_time': ed_wait
+            })
 
-        # 4) Optional Imaging
+        # ----- 4. Optional Imaging -----
         if np.random.random() < 0.5:
             imaging_time = self.scenario.ed_imaging_dist.sample()
             yield self.env.timeout(imaging_time)
 
-        # 5) Decision: ICU, MedSurg, or direct discharge
-        if self.scenario.icu_prob_dist.sample():
+        # ----- 5. Transfer Decision: ICU vs. MedSurg vs. Direct Discharge -----
+        # Here, we determine the route based on severity and probability.
+        transfer_to_icu = self.scenario.icu_prob_dist.sample() and (self.severity <= 2)
+        transfer_to_medsurg = self.scenario.medsurg_prob_dist.sample() and (self.severity > 1)
+        
+        # Set expected LOS from pre-defined means (can be refined using data)
+        if transfer_to_icu:
+            self.expected_LOS = getattr(self.scenario.icu_stay_dist, 'mean', self.scenario.icu_stay_dist.sample()) # LOOK INTO THIS 
             icu_wait_start = self.env.now
-            icu_bed = yield icu.get()
+            max_board_time = 240  # e.g., 4 hours max boarding time
+            icu_bed = None
+            # Formal queueing: try to get an ICU bed token
+            while (self.env.now - icu_wait_start) < max_board_time:
+                if len(icu.items) > 0:
+                    icu_bed = yield icu.get()
+                    break
+                else:
+                    yield self.env.timeout(1)  # Wait 1 minute and try again.
+            if not icu_bed:
+                # Failure Escalation: patient deteriorates if waiting too long
+                self.complication = True
+                self.event_log.append({
+                    'patient': self.pid,
+                    'event_type': 'complication',
+                    'event': 'icu_board_timeout',
+                    'time': self.env.now
+                })
+                # End the process (or proceed with a heavy penalty)
+                return
             self.icu_wait = self.env.now - icu_wait_start
             if self.scenario.icu_proc_prob_dist.sample():
                 proc_time = self.scenario.icu_proc_dist.sample()
                 yield self.env.timeout(proc_time)
-            icu_stay = self.scenario.icu_stay_dist.sample()
+            icu_stay = self.scenario.icu_stay_dist.sample() * nurse_effect  # extended if nurse shortage
             yield self.env.timeout(icu_stay)
             yield icu.put(icu_bed)
-        elif self.scenario.medsurg_prob_dist.sample():
-            ms_wait_start = self.env.now
-            ms_bed = yield medsurg.get()
-            self.medsurg_wait = self.env.now - ms_wait_start
-            ms_stay = self.scenario.medsurg_stay_dist.sample()
-            yield self.env.timeout(ms_stay)
-            yield medsurg.put(ms_bed)
-        else:
-            # direct discharge
-            pass
 
-        # 6) Final discharge
+        elif transfer_to_medsurg:
+            self.expected_LOS = getattr(self.scenario.medsurg_stay_dist, 'mean', self.scenario.medsurg_stay_dist.sample())
+            ms_wait_start = self.env.now
+            medsurg_bed = None
+            while True:
+                if len(medsurg.items) > 0:
+                    medsurg_bed = yield medsurg.get()
+                    break
+                else:
+                    yield self.env.timeout(1)
+            self.medsurg_wait = self.env.now - ms_wait_start
+            ms_stay = self.scenario.medsurg_stay_dist.sample() * nurse_effect
+            yield self.env.timeout(ms_stay)
+            yield medsurg.put(medsurg_bed)
+        else:
+            # Direct discharge; assign a lower expected LOS
+            self.expected_LOS = getattr(self.scenario.discharge_delay_dist, 'mean', self.scenario.discharge_delay_dist.sample())
+
+        # ----- 6. Final Discharge and LOS Evaluation -----
         dd = self.scenario.discharge_delay_dist.sample()
         yield self.env.timeout(dd)
-        
-        # Calculate total time in system
-        if self.env.now is not None and self.arrival is not None:
-            # Calculate total time in system
-            if self.arrival != -np.inf:
-                self.total_time = self.env.now - self.arrival
-            else:
-                self.total_time = np.nan
-        
+        self.total_time = self.env.now - self.arrival
+        los_deviation = self.total_time - self.expected_LOS
 
         self.event_log.append({
             'patient': self.pid,
             'event_type': 'arrival_departure',
             'event': 'discharge',
             'time': self.env.now,
-            'total_time': self.total_time
+            'total_time': self.total_time,
+            'expected_LOS': self.expected_LOS,
+            'los_deviation': los_deviation
         })
+        
+        
 
     def execute(self, triage, ed, icu, medsurg, nurse):
         yield from self.process(triage, ed, icu, medsurg, nurse)
