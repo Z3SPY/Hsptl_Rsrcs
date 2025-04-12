@@ -219,6 +219,11 @@ class Patient:
                 proc_time = self.scenario.icu_proc_dist.sample()
                 yield self.env.timeout(proc_time)
             icu_stay = self.scenario.icu_stay_dist.sample()
+
+            print("[DEBUG] Patient {} spent {:.2f} minutes in ICU.".format(self.pid, icu_stay))
+            print(f"[DEBUG] Patient {self.pid} waited {self.env.now - icu_wait_start:.2f} minutes for ICU.")
+            print(f"[DEBUG] Patient {self.pid} waited {self.env.now - self.arrival:.2f} minutes in total.")
+            
             yield self.env.timeout(icu_stay)
             yield icu.put(icu_bed)
         elif self.scenario.medsurg_prob_dist.sample():
@@ -226,13 +231,23 @@ class Patient:
             ms_bed = yield medsurg.get()
             self.medsurg_wait = self.env.now - ms_wait_start
             ms_stay = self.scenario.medsurg_stay_dist.sample()
+            print("[DEBUG] Patient {} spent {:.2f} minutes in MedSurg.".format(self.pid, ms_stay))
+            print(f"[DEBUG] Patient {self.pid} waited {self.env.now - ms_wait_start:.2f} minutes for MedSurg.")
+            print(f"[DEBUG] Patient {self.pid} waited {self.env.now - self.arrival:.2f} minutes in total.")
+            # Simulate MedSurg stay
+            # [CHANGE] Add a nurse effect here if needed
+            
             yield self.env.timeout(ms_stay)
             yield medsurg.put(ms_bed)
         else:
+            print(f"[DEBUG] Patient {self.pid} discharged directly.")
             pass  # direct discharge
 
         # 6) Final discharge
         dd = self.scenario.discharge_delay_dist.sample()
+        print("[DEBUG] Patient {} discharged after {:.2f} minutes.".format(self.pid, dd))
+        print(f"[DEBUG] Patient {self.pid} waited {self.env.now - triage_wait_start:.2f} minutes for discharge.")
+        print(f"[DEBUG] Patient {self.pid} waited {self.env.now - self.arrival:.2f} minutes in total.")
         yield self.env.timeout(dd)
 
         if self.env.now is not None and self.arrival is not None:
@@ -344,7 +359,9 @@ class Scenario:
         self.model = model
 
         # Build distributions
-        self.triage_dist = Exponential(self.triage_mean, random_seed=self.random_number_set+1)
+        # How Random is this
+
+        self.triage_dist = Exponential(self.triage_mean, random_seed=self.random_number_set+1) 
         self.ed_eval_dist = Exponential(self.ed_eval_mean, random_seed=self.random_number_set+2)
         self.ed_imaging_dist = Exponential(self.ed_imaging_mean, random_seed=self.random_number_set+3)
         self.icu_stay_dist = Exponential(self.icu_stay_mean, random_seed=self.random_number_set+4)
@@ -352,7 +369,7 @@ class Scenario:
         self.discharge_delay_dist = Exponential(self.discharge_delay_mean, random_seed=self.random_number_set+6)
         self.icu_proc_dist = Exponential(self.icu_proc_mean, random_seed=self.random_number_set+7)
 
-        self.icu_prob_dist = Bernoulli(self.p_icu, random_seed=self.random_number_set+8)
+        self.icu_prob_dist = Bernoulli(self.p_icu, random_seed=self.random_number_set+8) # Not Being Used
         self.medsurg_prob_dist = Bernoulli(self.p_medsurg, random_seed=self.random_number_set+9)
         self.icu_proc_prob_dist = Bernoulli(self.p_icu_procedure, random_seed=self.random_number_set+10)
 
@@ -605,6 +622,8 @@ class PatientFlow:
             # Nurse influence: if nurse pool is under pressure, triage takes longer.
             nurse_effect = self.get_nurse_effect(nurse)  # [CHANGE] Nurse throughput factor
             triage_time = base_triage_time * nurse_effect
+            print("[DEBUG] Patient {} spent {:.2f} minutes in triage.".format(self.pid, triage_time))
+            print(f"[DEBUG] Patient {self.pid} waited {self.env.now - triage_wait_start:.2f} minutes for triage.")
             yield self.env.timeout(triage_time)
 
         # ----- 2. Nurse Evaluation (using nurse pool tokens) -----
@@ -612,6 +631,8 @@ class PatientFlow:
             yield req
             base_nurse_eval = np.random.exponential(5)
             nurse_eval_time = base_nurse_eval * nurse_effect  # [CHANGE] Scale nurse eval time
+            print(f"[DEBUG] Patient {self.pid} spent {nurse_eval_time:.2f} minutes in nurse evaluation.")
+            print(f"[DEBUG] Patient {self.pid} waited {self.env.now - triage_wait_start:.2f} minutes for nurse evaluation.")
             yield self.env.timeout(nurse_eval_time)
 
         # ----- 3. ED Evaluation -----
@@ -629,6 +650,9 @@ class PatientFlow:
                 'time': self.env.now,
                 'wait_time': ed_wait
             })
+            print("[DEBUG] Patient {} completed ED evaluation.".format(self.pid))
+            print(f"[DEBUG] Patient {self.pid} waited {ed_wait:.2f} minutes for ED evaluation.")
+            
 
         # ----- 4. Optional Imaging -----
         if np.random.random() < 0.5:
@@ -650,9 +674,12 @@ class PatientFlow:
             while (self.env.now - icu_wait_start) < max_board_time:
                 if len(icu.items) > 0:
                     icu_bed = yield icu.get()
+                    print(f"[DEBUG] Patient {self.pid} got an ICU bed after {self.env.now - icu_wait_start:.2f} minutes.")
                     break
                 else:
+                    print(f"[DEBUG] Patient {self.pid} waiting for ICU bed...")
                     yield self.env.timeout(1)  # Wait 1 minute and try again.
+                    
             if not icu_bed:
                 # Failure Escalation: patient deteriorates if waiting too long
                 self.complication = True
@@ -662,7 +689,7 @@ class PatientFlow:
                     'event': 'icu_board_timeout',
                     'time': self.env.now
                 })
-                # End the process (or proceed with a heavy penalty)
+                print("[DEBUG] Patient {} deteriorated due to ICU boarding timeout.".format(self.pid))
                 return
             self.icu_wait = self.env.now - icu_wait_start
             if self.scenario.icu_proc_prob_dist.sample():
@@ -760,8 +787,9 @@ def multiple_replications(scenario, rc_period, n_reps=3, return_detailed_logs=Fa
 
 if __name__ == "__main__":
     # Basic usage
+    # For Some Reason Model Class runs faster? 
     scenario = Scenario(
-        simulation_time=7*24*60,
+        simulation_time=60*24,
         random_number_set=42
     )
     # single run test

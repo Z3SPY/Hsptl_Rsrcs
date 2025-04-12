@@ -8,7 +8,7 @@ from gym import spaces
 
 # Import your scenario and model from modelclass
 from modelclass import Scenario, WardFlowModel, PatientFlow
-
+import sys
 
 
 
@@ -470,8 +470,8 @@ class HospitalEnv(gym.Env):
 if __name__ == "__main__":
     # Create a scenario with 24 hours simulation time and baseline resource capacities.
     scenario = Scenario(
-        simulation_time=60 * 10
-        ,  # 24 hours in seconds
+        simulation_time=60 * 24,  # 24 hours in seconds
+        random_number_set=random.randint(0,sys.maxsize),
         n_icu_beds=32,
         n_medsurg_beds=32
     )
@@ -479,8 +479,8 @@ if __name__ == "__main__":
     # Create the environment with desired maximum capacities (we want to allow an increase)
     env = HospitalEnv(
         scenario,
-        max_icu=100,          # maximum ICU capacity that agent can set
-        max_medsurg=100,      # maximum MedSurg capacity that agent can set
+        max_icu=70,          # maximum ICU capacity that agent can set
+        max_medsurg=70,      # maximum MedSurg capacity that agent can set
         max_nurse_shift=10,
         debug_logs=True
     )
