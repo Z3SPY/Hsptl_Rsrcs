@@ -41,7 +41,7 @@ import plotly.graph_objects as go
 # 1. DATA LOADING & PREPROCESSING˜
 # -----------------------------
 # Load transfers dataset; ensure your CSV is named "transfers.csv" and in the same folder.
-df = pd.read_csv("unused/transfers.csv", parse_dates=["intime", "outtime"])
+df = pd.read_csv("unused/transfers.csv/transfers.csv", parse_dates=["intime", "outtime"])
 
 # Drop rows missing critical values (intime and eventtype)
 df = df.dropna(subset=["intime", "eventtype"])
@@ -97,12 +97,17 @@ def simplify_careunit(unit):
         "Special Care Nursery (SCN)": "Nursery",
         "Psychiatry": "Psych",
         "Observation": "Obs",
-        "UNKNOWN": "Unknown",
-        "Unknown": "Unknown"
-    }
+        "UNKNOWN": "Discharge",
+        "Unknown": "Discharge"
+    }   
+
+
     return mapping.get(unit, unit[:12])  # If not mapped, use the first 12 characters as a fallback
 
 # Apply the simplification to create a new column.
+
+careunit_counts = df["careunit"].value_counts(dropna=False)
+print(careunit_counts)
 df["careunit_simple"] = df["careunit"].apply(simplify_careunit)
 
 # Additionally, group care units into broader domains for higher-level analysis.

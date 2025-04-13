@@ -1,523 +1,297 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+"""
+Refactored Hospital Environment for DRL & MSO Integration (env_hospital.py)
+------------------------------------------------------------------------------
+This Gym environment wraps the SimPy-based hospital simulation (from modelclass.py)
+and provides:
+    - A snapshot-based observation space.
+    - A MultiDiscrete action space to control hospital resource allocation policy.
+    - Extensive debug logging for training integration and frontend snapshots.
+    
+Action Space (MultiDiscrete with 2 dimensions):
+    - Dimension 0: ICU Priority Policy 
+         0: Default ICU admission (only critical patients admitted)
+         1: Reserved ICU – become more conservative with moderate admissions
+         2: Overbook ICU – allow moderate patients to be admitted more aggressively.
+         
+    - Dimension 1: Nurse Shift Policy
+         0: Balanced Nurse Schedule (baseline)
+         1: Increase nurse capacity (nurse-heavy)
+         2: Decrease nurse capacity (nurse-light)
+         
+Observation: A vector from the current snapshot, including:
+    - ED available capacity (ED beds free)
+    - ICU available tokens (beds not in use)
+    - Ward available tokens (beds in Ward/MedSurg)
+    - Nurses available (current nurse capacity minus in-use count)
+    - Current simulation time (in minutes)
+    
+The environment advances in steps (each step has a fixed simulation run time in minutes).
+"""
+
 import simpy
 import numpy as np
-import random
-import time
-import datetime
 import gym
 from gym import spaces
+import datetime
+import time
 
-# Import your scenario and model from modelclass
-from modelclass import Scenario, WardFlowModel, PatientFlow
-import sys
+# Import your simulation model from modelclass
+from modelclass import WardFlowModel, Scenario
 
+# For debugging in this file, toggle this flag.
+DEBUG_LOGS = True
 
-
-
-###################################################
-# MultiDiscrete Action Wrapper
-###################################################
-class HospitalActionSpace:
-    """
-    MultiDiscrete for:
-      [ICU_alloc, MedSurg_alloc, nurse_shift, MSO_flag]
-
-    Where:
-      - ICU_alloc: 0..max_icu
-      - MedSurg_alloc: 0..max_medsurg
-      - nurse_shift: 0..max_nurse_shift (0=none, 1=+1, 2=+2, 3=-1 or custom)
-      - MSO_flag: 0 or 1
-    """
-    def __init__(self, max_icu=5, max_medsurg=5, max_nurse_shift=3):
-        self.max_icu = max_icu
-        self.max_medsurg = max_medsurg
-        self.max_nurse_shift = max_nurse_shift
-        self.action_space = spaces.MultiDiscrete([
-            max_icu + 1,
-            max_medsurg + 1,
-            max_nurse_shift + 1,
-            2
-        ])
-
-    def sample(self):
-        return self.action_space.sample()
-
-    def contains(self, action):
-        return self.action_space.contains(action)
-
-    def decode(self, action):
-        icu_alloc, med_alloc, nurse_val, mso_flag = action
-        return {
-            "icu": int(icu_alloc),
-            "medsurg": int(med_alloc),
-            "nurse_shift": int(nurse_val),
-            "mso": bool(mso_flag)
-        }
-
-###################################################
-# The Gym Environment
-###################################################
 class HospitalEnv(gym.Env):
     """
-    OpenAI Gym-compatible environment that wraps the SimPy hospital simulation.
-    Integrates an MSO planner for periodic planning, DRL agent for short-term control,
-    and includes logging enhancements.
-
-    Key expansions:
-      - MultiDiscrete action space
-      - Snapshot/restore for no-deepcopy rollouts
-      - Overfitting fix: clamp or penalize total bed usage
-      - Step-based running with a custom reward
+    OpenAI Gym Environment wrapping the WardFlowModel simulation.
     """
+    metadata = {'render.modes': ['human']}
+
     def __init__(self,
                  scenario: Scenario,
-                 # max for multi-discrete
-                 max_icu=24*24,
-                 max_medsurg=24,
-                 max_nurse_shift=3,
-                 # MSO integration
-                 use_mso=False,
-                 mso_planner=None,
-                 mso_frequency_hours=8,
-                 # Simulation step control
-                 step_minutes=60,
-                 # Logging toggles, if needed
-                 debug_logs=False):
-
-        super().__init__()
-
-        # Store scenario & MSO
+                 step_minutes: int = 60,   # Time advanced per step (in minutes)
+                 max_icu_policy: int = 2,    # 0,1,2 for ICU policy adjustments
+                 max_nurse_policy: int = 2): # 0,1,2 for nurse shift policy
+        super(HospitalEnv, self).__init__()
+        
+        # Store scenario and simulation step
         self.scenario = scenario
-        self.use_mso = use_mso
-        self.mso_planner = mso_planner
-        self.mso_interval = mso_frequency_hours * 60.0  # convert hours -> minutes
-        self.next_plan_time = 0.0
         self.step_minutes = step_minutes
-        self.debug_logs = debug_logs
 
-
-        self.planning_mode = False
-
-
-        # Build multi-discrete action space
-        self.hospital_action = HospitalActionSpace(max_icu, max_medsurg, max_nurse_shift)
-        self.action_space = self.hospital_action.action_space
-
-        # Observation space: e.g. [ED_in_use, ICU_free, MedSurg_free, Nurses_free, recommended_icu?]
-        # We'll keep it simple: [ed_in_use, icu_available, med_available, nurse_free, placeholder]
+        # Initialize the underlying simulation model.
+        self.model = WardFlowModel(scenario, start_datetime=datetime.datetime.now())
+        # Run initialization (simulate 0 minutes) so background processes start.
+        self.model.run(0)
+        
+        # Set up observation space: we'll create a state vector of 5 elements.
+        # For clarity, we assume:
+        #   obs[0]: ED available = (ED capacity - ed in use)
+        #   obs[1]: ICU available tokens (# tokens in ICU store)
+        #   obs[2]: Ward available tokens (# tokens in Ward store)
+        #   obs[3]: Nurses available = (nurse capacity - nurses in use)
+        #   obs[4]: Current simulation time (minutes)
         obs_high = np.array([
-            scenario.n_ed_beds,
-            scenario.n_icu_beds + scenario.n_medsurg_beds,
-            scenario.n_icu_beds + scenario.n_medsurg_beds,
-            scenario.day_shift_nurses + scenario.night_shift_nurses,
-            scenario.n_icu_beds + scenario.n_medsurg_beds
+            self.scenario.n_ed_beds,                      # max ED available
+            self.scenario.n_icu_beds,                     # max ICU tokens
+            self.scenario.n_ward_beds,                    # max Ward tokens
+            self.scenario.day_shift_nurses + self.scenario.night_shift_nurses,  # max nurses
+            self.scenario.simulation_time               # simulation total time in minutes
         ], dtype=np.float32)
-        self.observation_space = spaces.Box(
-            low=0.0,
-            high=obs_high,
-            shape=(5,),
-            dtype=np.float32
-        )
-
-        # We'll hold a reference to the WardFlowModel
-        self.model = None
-
-        # Additional state variables for nurse cost or bed usage
-        self.current_icu_beds = scenario.n_icu_beds
-        self.current_medsurg_beds = scenario.n_medsurg_beds
-        self.nurse_change_cost = 0.0
+        self.observation_space = spaces.Box(low=0.0, high=obs_high, shape=(5,), dtype=np.float32)
+        
+        # Define MultiDiscrete action space for policy adjustments:
+        # Two components:
+        #   - ICU policy: 0 (default), 1 (conservative), 2 (aggressive)
+        #   - Nurse shift policy: 0 (baseline), 1 (increase), 2 (decrease)
+        self.action_space = spaces.MultiDiscrete([3, 3])
+        
+        # Internal state variables for tracking policy parameters.
+        # Set initial nurse capacity policy from scenario.
+        self.current_nurse_policy = 0  # baseline
+        self.current_icu_policy = 0    # default
+        self.current_time = self.model.env.now  # in minutes
+        
+        # For reward tracking:
+        self.last_reward_time = 0.0
         self.cumulative_reward = 0.0
-        self.episode_start_time = None
-
-        #Reward    
-        self.last_reward_time = 0.0  # This prevents the AttributeError
-        self.shift_reward_acc = 0.0  
-        self.shift_duration = 480  
-
-
+        
     def reset(self):
         """
-        Initialize a new simulation episode:
-         - Build the underlying WardFlowModel from scenario
-         - Start background processes
-         - Reset bed usage, nurse costs, logs
+        Resets the simulation environment and returns the initial observation.
+        Also resets the simulation's internal clock and resource allocations.
         """
-        
-        # Build the model
+        if DEBUG_LOGS:
+            print("[DEBUG] Resetting Hospital Environment.")
         self.model = WardFlowModel(self.scenario, start_datetime=datetime.datetime.now())
-        # Run up to 0 to initialize everything
-
-        self.model.run(0)
-
-        # Reset everything
-        self.current_icu_beds = self.scenario.n_icu_beds
-        self.current_medsurg_beds = self.scenario.n_medsurg_beds
-        self.nurse_change_cost = 0.0
-        self.cumulative_reward = 0.0
-        self.episode_start_time = time.time()
-
-        # If we do MSO planning at time=0, do it
-        self.next_plan_time = 0.0
+        self.model.run(0)  # Reinitialize simulation processes
+        
+        # Reset any policy-related variables if needed.
+        self.current_nurse_policy = 0
+        self.current_icu_policy = 0
         self.last_reward_time = 0.0
-        self.shift_reward_acc = 0.0  
-
-        obs = self._get_obs() 
-
-        print("[DEBUG] Resetting environment")
-        if isinstance(obs, np.ndarray):
-            print(f"[DEBUG] Reset obs shape: {obs.shape}")
-        else:
-            print(f"[DEBUG] Reset obs type: {type(obs)} => {obs}")
-
-
+        self.cumulative_reward = 0.0
+        
+        obs = self._get_obs()
+        if DEBUG_LOGS:
+            print(f"[DEBUG] Reset observation: {obs}")
         return obs
-    
 
-    # GET REWARD
-
-    def get_final_state(self):
-        final_state = {
-            "Time": self.model.env.now,
-            "ICU_tokens": len(self.model.icu.items),
-            "ICU_capacity": self.current_icu_beds,
-            "MedSurg_tokens": len(self.model.medsurg.items),
-            "MedSurg_capacity": self.current_medsurg_beds,
-            "Nurses_available": self.model.nurses.capacity - self.model.nurses.count,
-            "ED_usage": self.model.ed.count,
-        }
-        # You can add more details depending on your WardFlowModel structure.
-        return final_state
-
+    def _get_obs(self):
+        """
+        Returns the current observation vector using the model's snapshot.
+        Converts the snapshot dictionary into a vector.
+        """
+        snapshot = self.model.snapshot_state()
+        # We assume snapshot contains: ed_in_use, icu_available, ward_available, nurses_available, time, total_patients
+        ed_avail = self.scenario.n_ed_beds - snapshot.get('ed_in_use', 0)
+        icu_avail = snapshot.get('icu_available', 0)
+        ward_avail = snapshot.get('ward_available', 0)
+        nurses_avail = snapshot.get('nurses_available', 0)
+        current_time = snapshot.get('time', 0)
+        obs_vector = np.array([ed_avail, icu_avail, ward_avail, nurses_avail, current_time], dtype=np.float32)
+        if DEBUG_LOGS:
+            print(f"[DEBUG] Observation vector: {obs_vector}")
+        return obs_vector
 
     def step(self, action):
         """
-        Executes one simulation step based on the given action.
-        Aggregates reward over a defined shift_duration.
+        Applies the agent's action, advances the simulation by a fixed time step (step_minutes),
+        and returns the new observation, reward, done flag, and additional info.
         """
-        # Ensure model is initialized.
-        if self.model is None:
-            print("[WARNING] 'model' is None; calling reset() automatically.")
-            obs = self.reset()
-            return obs, 0.0, False, {"auto_reset": True}
-
-        # 1. Planner override logic (as implemented previously) remains.
-        if self.use_mso and (self.model.env.now >= self.next_plan_time):
-            planned_action, planned_value = self.mso_planner.best_action(self)
-            if self.debug_logs:
-                print(f"[DEBUG] Planner override activated at time {self.model.env.now}.")
-                print(f"[DEBUG] Planner selected action: {planned_action} with estimated value: {planned_value}.")
-            action = planned_action
-            self.next_plan_time = self.model.env.now + self.mso_interval
-
-        # 2. Decode and apply the action.
-        decoded = self.hospital_action.decode(action)
-        new_icu = decoded["icu"]
-        new_medsurg = decoded["medsurg"]
-        nurse_shift_val = decoded["nurse_shift"]
-
-        # Update ICU capacity.
-        if new_icu != self.current_icu_beds:
-            if new_icu > self.current_icu_beds:
-                added = new_icu - self.current_icu_beds
-                for i in range(added):
-                    self.model.icu.put(f"ICU_Bed_Extra_{i+1}")
-            else:
-                reduction = self.current_icu_beds - new_icu
-                available = len(self.model.icu.items)
-                if available >= reduction:
-                    for i in range(reduction):
-                        self.model.icu.items.pop(0)
-                else:
-                    print("[WARNING] Not enough ICU tokens available to reduce capacity as requested.")
-            self.current_icu_beds = new_icu
-
-        # Update MedSurg capacity.
-        if new_medsurg != self.current_medsurg_beds:
-            if new_medsurg > self.current_medsurg_beds:
-                added = new_medsurg - self.current_medsurg_beds
-                for i in range(added):
-                    self.model.medsurg.put(f"MedSurg_Bed_Extra_{i+1}")
-            else:
-                reduction = self.current_medsurg_beds - new_medsurg
-                available = len(self.model.medsurg.items)
-                if available >= reduction:
-                    for i in range(reduction):
-                        self.model.medsurg.items.pop(0)
-                else:
-                    print("[WARNING] Not enough MedSurg tokens available to reduce capacity as requested.")
-            self.current_medsurg_beds = new_medsurg
-
-        # Update nurse capacity.
-        baseline = self.scenario.day_shift_nurses  # This could be dynamic based on current time.
-        new_nurse_capacity = baseline + nurse_shift_val
-        self.model.nurses.capacity = new_nurse_capacity
-        # Optionally update a current nurse capacity variable.
-        # self.current_nurse_capacity = new_nurse_capacity
-
-        # 3. Advance the simulation.
-        self.model.run(self.step_minutes)  # Advance simulation by step_minutes.
-        current_time = self.model.env.now
-
-        # 4. Compute reward for the time interval since last reward calculation.
-        # Get events from the event log with times in (last_reward_time, current_time].
-        recent_events = [e for e in self.model.event_log if self.last_reward_time < e["time"] <= current_time]
-        step_reward = self.compute_reward_from_events(recent_events)
-        self.shift_reward_acc += step_reward
-
-        # 5. Check if the shift duration has elapsed.
-        if current_time - self.last_reward_time >= self.shift_duration:
-            aggregated_reward = self.shift_reward_acc
-            # Reset accumulator and update reward marker.
-            self.shift_reward_acc = 0.0
-            self.last_reward_time = current_time
-            reward_to_return = aggregated_reward
-            if self.debug_logs:
-                print(f"[SHIFT REWARD] Time: {current_time:.2f}, Aggregated Reward: {aggregated_reward:.2f}")
+        if DEBUG_LOGS:
+            print(f"[DEBUG] Step called with action: {action}")
+        # Decode action using MultiDiscrete structure.
+        # Action: [icu_policy, nurse_shift_policy]
+        icu_policy = int(action[0])
+        nurse_policy = int(action[1])
+        if DEBUG_LOGS:
+            print(f"[DEBUG] Decoded action - ICU Policy: {icu_policy}, Nurse Shift Policy: {nurse_policy}")
+        
+        # Update internal policy parameters accordingly:
+        # For ICU policy:
+        #   0: default, 1: be conservative (e.g., only admit critical patients to ICU)
+        #   2: aggressive (allow more moderate patients into ICU, even if it means some delay)
+        self.current_icu_policy = icu_policy
+        # Here, you could adjust a parameter in the scenario or WardFlowModel accordingly.
+        # For example, modify a threshold (this is a placeholder for your logic):
+        if icu_policy == 1:
+            # More conservative: perhaps increase the chance that moderate patients remain in Ward.
+            self.scenario.p_icu = 0.2  # lower probability for ICU admission
+        elif icu_policy == 2:
+            # More aggressive: increase ICU admissions.
+            self.scenario.p_icu = 0.4
         else:
-            reward_to_return = 0.0  # No aggregated reward until a shift is complete.
-
-        # 6. Get updated observation.
+            self.scenario.p_icu = 0.3  # baseline
+        
+        # For Nurse shift policy:
+        #   0: baseline, 1: increase nurse capacity, 2: decrease nurse capacity.
+        self.current_nurse_policy = nurse_policy
+        base_nurse = self.scenario.day_shift_nurses  # assume day shift for simplicity here
+        if nurse_policy == 1:
+            new_nurse_capacity = base_nurse + 2
+        elif nurse_policy == 2:
+            new_nurse_capacity = max(1, base_nurse - 2)
+        else:
+            new_nurse_capacity = base_nurse
+        # Update nurse resource capacity
+        self.model.nurses.capacity = new_nurse_capacity
+        if DEBUG_LOGS:
+            print(f"[DEBUG] Nurse capacity updated to: {new_nurse_capacity}")
+        
+        # Advance simulation by fixed step
+        self.model.run(self.step_minutes)
+        self.current_time = self.model.env.now
+        
+        # Compute reward based on events that occurred since last reward time.
+        recent_events = [e for e in self.model.event_log if self.last_reward_time < e["time"] <= self.current_time]
+        step_reward = self.compute_reward(recent_events)
+        self.last_reward_time = self.current_time
+        self.cumulative_reward += step_reward
+        
+        # Get new observation.
         obs = self._get_obs()
-        # 7. Check termination condition.
-        done = current_time >= self.scenario.simulation_time
-        info = {"current_time": current_time, "shift_reward": reward_to_return}
-        self.cumulative_reward += reward_to_return
-
-        # 8. Optionally, at the end of an episode, log final state.
-        if done:
-            final_state = self.get_final_state()
-            print("[FINAL OBSERVATION]", final_state)
-            info["final_state"] = final_state
-
-        return obs, reward_to_return, done, info
-
-
-
-
-
-    def _get_obs(self):
-        # Construct an observation vector that includes current resource statuses
-        obs = np.array([
-            self.scenario.n_ed_beds - self.model.ed.count,  # ED available
-            len(self.model.icu.items),                      # ICU available (tokens)
-            len(self.model.medsurg.items),                  # MedSurg available (tokens)
-            self.model.nurses.capacity - self.model.nurses.count,  # Nurses available
-            # Optionally, add more aggregated metrics, e.g., average wait time from the audit.
-            np.mean([r.get('ed_in_use', 0) for r in self.model.utilisation_audit])  # simple placeholder
-        ], dtype=np.float32)
-        return obs
-
-
-    
-    
-    def _compute_reward(self):
-        current_time = self.model.env.now
-        if not hasattr(self, "last_reward_time"):
-            self.last_reward_time = 0
-
-        relevant_events = [e for e in self.model.event_log if self.last_reward_time < e['time'] <= current_time]
-
-        r1_discharge = 0
-        r2_delay_penalty = 0
-        r3_unserved = 0
-        r4_resource_penalty = 0
-        r5_queue_penalty = 0
-        r6_transfer_bonus = 0
-        r7_boarding_penalty = 0
-
-        for event in relevant_events:
-            if event.get('event') == 'discharge':
-                if event.get('los_deviation', 0) <= 0:
-                    r1_discharge += 1
-                else:
-                    r2_delay_penalty += event.get('los_deviation', 0)
-            elif event.get('event_type') == 'complication':
-                r7_boarding_penalty += 1
-            elif event.get('event') == 'transfer':
-                r6_transfer_bonus += 1
-
-        # Resource overuse
-        extra_icu = max(0, self.current_icu_beds - self.scenario.n_icu_beds)
-        extra_med = max(0, self.current_medsurg_beds - self.scenario.n_medsurg_beds)
-        base_nurse = self.scenario.day_shift_nurses if (int(self.model.env.now // 60) % 24) in range(7, 19) else self.scenario.night_shift_nurses
-        extra_nurses = max(0, self.model.nurses.capacity - base_nurse)
-        r4_resource_penalty = extra_icu + extra_med + extra_nurses
-
-        # Queue penalty (ED queue only for now)
-        queue_len = len(self.model.ed.queue) if hasattr(self.model.ed, 'queue') else 0
-        r5_queue_penalty = queue_len
-
-        reward = (
-            2.0 * r1_discharge +
-            -0.1 * r2_delay_penalty +
-            -5.0 * r3_unserved +
-            -0.5 * r4_resource_penalty +
-            -0.2 * r5_queue_penalty +
-            1.0 * r6_transfer_bonus +
-            -10.0 * r7_boarding_penalty
-        )
-
-
-        debug = True
-        if self.debug_logs and debug:
-            print(f"[REWARD DEBUG] Time={self.model.env.now}, "
-              f"Discharges={r1_discharge}, DelayPenalty={r2_delay_penalty}, "
-              f"Unserved={r3_unserved}, ResourcePenalty={r4_resource_penalty}, "
-              f"QueuePenalty={r5_queue_penalty}, Transfers={r6_transfer_bonus}, "
-              f"Boarding={r7_boarding_penalty}, TotalReward={reward}")
-
-        self.last_reward_time = current_time
-        return np.clip(reward, -100, 100)
-
-    
-
-    def compute_reward_from_events(self, events):
-        r_discharges = sum(1 for e in events if e.get("event") == "discharge" and e.get("los_deviation", 0) <= 0)
-        r_delay = sum(e.get("los_deviation", 0) for e in events if e.get("event") == "discharge" and e.get("los_deviation", 0) > 0)
-        r_complications = sum(1 for e in events if e.get("event_type") == "complication")
-        r_transfers = sum(1 for e in events if e.get("event") == "transfer")
-        # For the queue, compute a dynamic penalty, if our model provides a proper ED queue.
-        queue_penalty = 0
-        if hasattr(self.model, "ed") and hasattr(self.model.ed, "queue"):
-            for patient in self.model.ed.queue:
-                wait_time = self.model.env.now - getattr(patient, "arrival_time", 0)
-                severity = getattr(patient, "severity", 1)
-                queue_penalty += severity * (wait_time / 60)
         
-        # Resource cost could be a function of extra resources used.
-        extra_resources = (max(0, self.current_icu_beds - self.scenario.n_icu_beds) +
-                        max(0, self.current_medsurg_beds - self.scenario.n_medsurg_beds))
+        # Determine if simulation is done.
+        done = self.current_time >= self.scenario.simulation_time
         
-        # Define weight factors
-        w_discharges = 1.0
-        w_delay = -0.5
-        w_complications = -1.5
-        w_transfers = 0.5
-        w_queue = -0.3
-        w_resource = -0.2
-        
-        reward = (w_discharges * r_discharges +
-                w_delay * r_delay +
-                w_complications * r_complications +
-                w_transfers * r_transfers +
-                w_queue * queue_penalty +
-                w_resource * extra_resources)
-        
-        debug = False
-        if self.debug_logs and debug:
-            print(f"[REWARD DEBUG] Time={self.model.env.now}, "
-              f"Discharges={r_discharges}, DelayPenalty={r_delay}, "
-              f"Unserved={r_complications}, ResourcePenalty={r_transfers}, "
-              f"QueuePenalty={queue_penalty}, Transfers={extra_resources}, "
-              f"TotalReward={reward}")
-
-        return reward
-
-
-
-    #######################################################
-    # Snapshot / Restore for advanced planning or MCTS
-    #######################################################
-    def snapshot_state(self):
-        """
-        Minimal but sufficient environment state capturing:
-        - sim time
-        - bed usage & nurse cost
-        - RNG states
-        - Patient data
-        - If you need store items or resource usage, add them here
-        """
-        return {
-            "sim_time": self.model.env.now,
-            "icu_beds": self.current_icu_beds,
-            "med_beds": self.current_medsurg_beds,
-            "nurse_cost": self.nurse_change_cost,
-            "rng_np": np.random.get_state(),
-            "rng_py": random.getstate(),
-            # Rebuild patients
-            "patients": [p.to_dict() for p in self.model.patients],
+        # Build info dictionary (for debugging & logging)
+        info = {
+            'current_time': self.current_time,
+            'step_reward': step_reward,
+            'cumulative_reward': self.cumulative_reward,
+            'recent_events': recent_events  # optionally, for debugging
         }
+        if DEBUG_LOGS:
+            print(f"[DEBUG] Step result - Time: {self.current_time}, Reward: {step_reward}, Done: {done}")
+        return obs, step_reward, done, info
 
-    def restore_state(self, snap):
+    def compute_reward(self, events):
+        """
+        Compute reward based on recent events.
+        For example, reward successful discharges and penalize long waits or complications.
+        Here, a simple reward function is implemented.
+        """
+        discharge_bonus = 0.0
+        delay_penalty = 0.0
+        complication_penalty = 0.0
+
+        for event in events:
+            if event.get('event') == 'discharge':
+                # Reward discharge; if LOS (total_time) is less than a target, give bonus.
+                los = event.get('total_time', 0)
+                target_los = 480  # e.g., 8 hours target LOS
+                if los <= target_los:
+                    discharge_bonus += 1.0
+                else:
+                    delay_penalty += (los - target_los) * 0.01
+            if event.get('event_type') == 'complication':
+                complication_penalty += 5.0
         
-        #Rebuild the environment from the snapshot dictionary.
-        #This is used instead of a heavy `deepcopy(self)`.
-        
-        self.model.env._now = snap["sim_time"]
-        self.current_icu_beds = snap["icu_beds"]
-        self.current_medsurg_beds = snap["med_beds"]
-        self.nurse_change_cost = snap["nurse_cost"]
+        # Additional penalty: higher ED congestion results in lower reward.
+        ed_queue_penalty = self._get_obs()[0] * 0.1
 
-        np.random.set_state(snap["rng_np"])
-        random.setstate(snap["rng_py"])
+        total_reward = discharge_bonus - delay_penalty - complication_penalty - ed_queue_penalty
+        if DEBUG_LOGS:
+            print(f"[DEBUG] Computed Reward: {total_reward} (Discharge bonus: {discharge_bonus}, Delay penalty: {delay_penalty}, Complication penalty: {complication_penalty}, ED queue penalty: {ed_queue_penalty})")
+        return total_reward
 
-        # Rebuild patients
-        self.model.patients = []
-        for data in snap["patients"]:
-            self.model.patients.append(PatientFlow.from_dict(data))
+    def render(self, mode='human'):
+        # For basic rendering, print out the current snapshot.
+        state = self.model.snapshot_state()
+        print(f"Render at time {state['time']} minutes: ED usage: {self.model.ed.count}, ICU available: {len(self.model.icu.items)}, Ward available: {len(self.model.ward.items)}, Nurses available: {self.model.nurses.capacity - self.model.nurses.count}")
+        return state
 
-        # If you also want to restore store items for ICU or MedSurg, do that here:
-        # e.g., self.model.icu.items = snapshot["icu_items"]
-        # That might require you to store them in snapshot_state too.
-
-        # Done
-        if self.debug_logs:
-            print(f"[RestoreState] Reverted to time={snap['sim_time']} with {len(self.model.patients)} patients")
+    def close(self):
+        # Cleanup if necessary.
+        print("[DEBUG] Closing Hospital Environment")
 
 
-###################################################
-# If you need a quick test:
-###################################################
 if __name__ == "__main__":
-    # Create a scenario with 24 hours simulation time and baseline resource capacities.
+    
     scenario = Scenario(
-        simulation_time=60 * 24,  # 24 hours in seconds
-        random_number_set=random.randint(0,sys.maxsize),
-        n_icu_beds=32,
-        n_medsurg_beds=32
+        simulation_time=4 * 60,  # 4 hours in minutes
+        random_number_set=42,
+        n_triage=4,
+        n_ed_beds=4,
+        n_icu_beds=4,
+        n_ward_beds=4,          # Ward is the rebranded MedSurg
+        triage_mean=10.0,
+        ed_eval_mean=60.0,
+        ed_imaging_mean=30.0,
+        icu_stay_mean=360.0,
+        ward_stay_mean=240.0,
+        discharge_delay_mean=15.0,
+        icu_proc_mean=30.0,
+        p_icu=0.3,
+        p_ward=0.5,
+        p_deteriorate=0.3,
+        p_icu_procedure=0.5,
+        day_shift_nurses=10,
+        night_shift_nurses=5,
+        shift_length=12,
+        model="resource_allocation"
     )
+
+    # Instantiate the Gym environment.
+    env = HospitalEnv(scenario=scenario, step_minutes=60)
     
-    # Create the environment with desired maximum capacities (we want to allow an increase)
-    env = HospitalEnv(
-        scenario,
-        max_icu=70,          # maximum ICU capacity that agent can set
-        max_medsurg=70,      # maximum MedSurg capacity that agent can set
-        max_nurse_shift=10,
-        debug_logs=True
-    )
+    # Reset environment
+    obs = env.reset()
+    print("Initial Observation:", obs)
     
-    # Ensure the environment is reset first
-    initial_obs = env.reset()
-    print("[TEST] Environment reset complete. Initial observation:", initial_obs)
-    
-    # For testing, create a test action that sets:
-    # - ICU capacity to 6 (an increase from the baseline 4)
-    # - MedSurg capacity to 8 (an increase from the baseline 4)
-    # - Nurse shift change is set to 0 (no change)
-    # - MSO flag is 0 (not triggering the planner)
-    test_action = np.array([6, 8, 0, 0])
-    print("[TEST] Test action:", test_action)
-    
-    # Call step() with this test action
-    obs, reward, done, info = env.step(test_action)
-    
-    # Print the number of tokens in the ICU and MedSurg stores to verify dynamic update.
-    print("Post-step ICU tokens count:", len(env.model.icu.items))
-    print("Post-step MedSurg tokens count:", len(env.model.medsurg.items))
-    
-    # Optionally, run a simple simulation loop for further testing.
     done = False
     total_reward = 0.0
     step_count = 0
-    
-    while not done:
-        # Using random actions from the action space
-        act = env.action_space.sample()
-        obs, rew, done, info = env.step(act)
-        total_reward += rew
-        step_count += 1
-    
-    print(f"Episode ended. Steps={step_count}, total reward={total_reward}")
-    if "episode_summary" in info:
-        print("Episode summary:", info["episode_summary"])
 
-    
+    # Run simulation with random actions for testing.
+    while not done:
+        action = env.action_space.sample()  # Replace with your agent's action during training.
+        print(f"[DEBUG] Step {step_count}, Action: {action}")
+        obs, reward, done, info = env.step(action)
+        total_reward += reward
+        step_count += 1
+        env.render()  # Print out current state snapshot.
+
+    print(f"Simulation finished after {step_count} steps. Total Reward: {total_reward}")

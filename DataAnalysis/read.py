@@ -5,8 +5,8 @@ import matplotlib.pyplot as plt
 # ---------------------------------------------------------
 # 1. Load the CSV files
 # ---------------------------------------------------------
-patients = pd.read_csv("unused/patients.csv")
-admissions = pd.read_csv("unused/admissions.csv")
+patients = pd.read_csv("unused/patients.csv/patients.csv")
+admissions = pd.read_csv("unused/admissions.csv/admissions.csv")
 
 
 # ---------------------------------------------------------
