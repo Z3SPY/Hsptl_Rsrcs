@@ -21,39 +21,123 @@ import datetime
 import random
 import itertools
 from gymnasium import spaces
+import json
+import pandas as pd
+import os
+
+
+class NurseGroup:
+    def __init__(self, base_nurses, name='Nurses'):
+        self.base_nurses = base_nurses
+        self.current_nurses = base_nurses  # This might decrease with fatigue or shift changes
+
+    def get_fatigue_factor(self):
+        # Example: if nurses are less than the base, the fatigue is higher
+        if self.current_nurses < self.base_nurses:
+            diff = self.base_nurses - self.current_nurses
+            return 1.0 + 0.1 * diff
+        return 1.0
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 0. Load empirical parameters
+# ─────────────────────────────────────────────────────────────────────────────
+with open("DataAnalysis/empirical_params.json") as f:
+    _js = json.load(f)
+LAMBDA_HOUR    = _js["lambda_hour"]        # 24‑vector of λ arrivals/hr
+SEVERITY_PROBS = _js["class_probs"]        # [p_G1‑2, p_G3, p_G4‑5]
+# Map severity 1→G1‑2, 2→G3, 3→G4‑5
+LOS_PARAMS     = {
+    1: tuple(_js["lognorm_params"]["G1-2"]),
+    2: tuple(_js["lognorm_params"]["G3"]),
+    3: tuple(_js["lognorm_params"]["G4-5"])
+}
+
 
 
 #############################
 # 1. Scenario
 #############################
+import os
+import numpy as np
+import pandas as pd
+from scipy.stats import norm  # for log‑normal quantile
+
 class Scenario:
-    def __init__(self,
-                 simulation_time=60*24*7,  # total simulation time in minutes (e.g., 7 days)
-                 shift_length=8*60,       # 8-hour shift in minutes
-                 n_ed_beds=15,
-                 n_icu_beds=4,
-                 n_medsurg_beds=10,
-                 day_shift_nurses=10,
-                 night_shift_nurses=5,
-                 ed_treatment_mean=2.0,   # mean treatment time in ED in hours
-                 icu_los_mean=2.0,        # mean ICU length-of-stay in days
-                 ms_los_mean=3.5,         # mean ward length-of-stay in days
-                 nurse_fatigue_factor=0.1, 
-                 arrival_profile=None):
-        self.simulation_time = simulation_time
-        self.shift_length = shift_length
-        self.n_ed_beds = n_ed_beds
-        self.n_icu_beds = n_icu_beds
-        self.n_medsurg_beds = n_medsurg_beds
-        self.day_shift_nurses = day_shift_nurses
+    def __init__(
+        self,
+        simulation_time: float       = 60*24*7,
+        shift_length: float          = 8*60,
+        n_ed_beds: int               = 15,
+        n_icu_beds: int              = 4,
+        n_medsurg_beds: int          = 10,
+        day_shift_nurses: int        = 10,
+        night_shift_nurses: int      = 5,
+        arrival_profile: list[float] = None,   # λ per hour
+        severity_probs: list[float]  = None,   # P(severity=1,2,3)
+        los_params: dict[int,tuple]  = None,   # log‑normal params by severity
+        within_stay_csv: str         = "DataAnalysis/graph/P_within_stay.csv",
+        exit_probs_csv: str          = "DataAnalysis/graph/P_exit_by_group.csv",
+        los_cap_quantile: float      = 0.99
+    ):
+        # 1. Core simulation parameters
+        self.simulation_time    = simulation_time
+        self.shift_length       = shift_length
+        self.n_ed_beds          = n_ed_beds
+        self.n_icu_beds         = n_icu_beds
+        self.n_medsurg_beds     = n_medsurg_beds
+        self.day_shift_nurses   = day_shift_nurses
         self.night_shift_nurses = night_shift_nurses
-        self.ed_treatment_mean = ed_treatment_mean  # in hours
-        self.icu_los_mean = icu_los_mean * 24 * 60    # convert days to minutes
-        self.ms_los_mean = ms_los_mean * 24 * 60
-        self.nurse_fatigue_factor = nurse_fatigue_factor
-        # A 24-element profile for hourly arrivals (patients per hour)
-        self.arrival_profile = arrival_profile or [1, 1, 2, 2, 3, 4, 6, 8, 10, 10, 9, 9,
-                                                     8, 8, 7, 6, 5, 5, 4, 3, 3, 2, 2, 1]
+
+        # 2. Arrival & severity profile
+        self.arrival_profile = arrival_profile or [1.0] * 24
+        self.severity_probs  = severity_probs  or [1/3, 1/3, 1/3]
+
+        # 3. Length of stay (log-normal μ,σ) by severity
+        self.los_params = los_params or {
+            1: (np.log(60),  1.0),
+            2: (np.log(120), 1.0),
+            3: (np.log(240), 1.0)
+        }
+
+        # 4. Within-stay transition matrix
+        if os.path.isfile(within_stay_csv):
+            df_w = pd.read_csv(within_stay_csv, index_col=0)
+            self.within_stay_probs = df_w.to_dict(orient="index")
+        else:
+            # Default transition routing (used by DRL flow)
+            self.within_stay_probs = {
+                "ED":       {"Discharge": 0.20, "ICU": 0.30, "Ward": 0.50},
+                "ICU":      {"Discharge": 0.60, "Ward": 0.40},
+                "Ward":     {"Discharge": 1.00},
+                "Discharge":{"Discharge": 1.00},  # absorbing state
+            }
+
+        # 5. Exit probabilities after "Discharge" (used for optional future transition logic)
+        if os.path.isfile(exit_probs_csv):
+            df_e = pd.read_csv(exit_probs_csv, index_col=0)
+            if "P_exit" in df_e.columns:
+                self.exit_probs = df_e["P_exit"].to_dict()
+            else:
+                self.exit_probs = {g: 1.0 / len(df_e) for g in df_e.index}
+        else:
+            # Equal fallback if CSV missing or not yet in use
+            groups = list(self.within_stay_probs.keys())
+            fallback_prob = 1.0 / len(groups)
+            self.exit_probs = {g: fallback_prob for g in groups}
+
+        # 6. LOS capping logic
+        #    a) ED LOS cap from exponential distribution
+        ed_mean_min = 60.0  # default; change if you want to pass a mean treatment time
+        ed_rate = 1.0 / ed_mean_min
+        self.ed_max = -np.log(1.0 - los_cap_quantile) / ed_rate
+
+        #    b) ICU/Ward LOS cap from log-normal quantiles
+        z = norm.ppf(los_cap_quantile)
+        self.los_max = {}
+        for sev, (mu, sigma) in self.los_params.items():
+            self.los_max[sev] = float(np.exp(mu + sigma * z))
+
 
 #############################
 # 2. Resource Classes
@@ -76,6 +160,10 @@ class CareUnit:
     
     def beds_in_use(self):
         return self.capacity - len(self.store.items)
+    
+    def available_beds(self):
+        # NEW: returns the number of available beds
+        return len(self.store.items)
 
     def occupy_bed(self):
         return self.store.get()
@@ -113,17 +201,17 @@ class NurseGroup:
 # 3. Patient Class
 #############################
 class Patient:
-    """
-    Tracks an individual patient’s flow and times.
-    """
-    def __init__(self, pid, arrival_time, severity):
+    def __init__(self, pid, severity, arrival_time):
         self.pid = pid
-        self.arrival_time = arrival_time
         self.severity = severity
-        self.state = "WAITING"   # initial state
+        self.arrival_time = arrival_time
+        self.status = "waiting"
+        self.current_unit = "ED"
         self.start_treatment = None
         self.end_treatment = None
         self.discharge_time = None
+        self.event_log = []
+
 
 #############################
 # 4. HospitalFlowModel
@@ -147,6 +235,13 @@ class HospitalFlowModel:
         self.pid_counter = 0
         self.utilisation_log = []
 
+        # REMOVE IF POSSIBOLE?    
+        self.trans_probs = scenario.within_stay_probs
+        self.exit_probs  = scenario.exit_probs
+
+        self.boarding_registry = {}  # Tracks patients waiting for ICU/Ward
+        self.overflow_allowed = False  # Controlled by DRL agent or scenario toggle
+
         # Create CareUnits:
         self.ed = CareUnit(self.env, "ED", scenario.n_ed_beds)
         self.icu = CareUnit(self.env, "ICU", scenario.n_icu_beds)
@@ -167,239 +262,400 @@ class HospitalFlowModel:
         self.icu_threshold = 0.5
 
         # Statistics
-        self.discharge_count = 0
         self.lwbs_count = 0
-        self.icu_admits = 0
-        self.ward_admits = 0
-        self.transferred_out = 0
+        self.discharge_count = 0
         self.boarded_count = 0
+        self.transferred_out = 0
+        self.pid_counter = 1
+        self.patients = []
+        self.event_log = []
+
+        self.icu_admits = 0           # Initialize ICU admissions counter
+        self.ward_admits = 0          # Initialize Ward admissions counter
 
         # For background initialization
         self.background_started = False
 
+        
+        # ---- NOW seed the first utilisation record -----------
+        initial_audit = self.utilisation_audit(current_time=0.0)
+        self.utilisation_log.append(initial_audit)
+
+
+    @property
+    def nurse_fatigue(self):
+        """
+        Compute a composite nurse fatigue value by weighting the fatigue factors
+        from day and night nurse groups. This aggregated value reflects the overall
+        staffing strain in the hospital.
+        """
+        total_base = self.nurse_day.base_nurses + self.nurse_night.base_nurses
+        fatigue_day = self.nurse_day.get_fatigue_factor(self.scenario)
+        fatigue_night = self.nurse_night.get_fatigue_factor(self.scenario)
+        # Compute weighted average based on the base numbers:
+        weighted_fatigue = (
+            (fatigue_day * self.nurse_day.base_nurses) +
+            (fatigue_night * self.nurse_night.base_nurses)
+        ) / total_base if total_base > 0 else 1.0
+        return weighted_fatigue
+
+
+
+    def get_severity_multiplier(self, severity):
+        return {1: 0.8, 2: 1.0, 3: 1.5}.get(severity, 1.0)
+
+    def try_transfer_or_board(self, patient, target_unit: str):
+        """
+        Try to admit the patient to the target unit.
+        If unavailable, either board the patient or transfer out.
+        Returns: SimPy resource (bed) or None if transferred.
+        """
+        self.log_event(patient, f"{target_unit.lower()}_request")
+
+        if target_unit == "ICU":
+            resource = self.icu
+        elif target_unit == "Ward":
+            resource = self.medsurg
+        else:
+            raise ValueError(f"Unknown unit: {target_unit}")
+
+        if not resource.bed_available():
+            yield from self._handle_boarding(patient, target_unit=target_unit)
+            return None  # Transferred out or abandoned
+
+        bed = yield resource.occupy_bed()
+        return bed
+    
+    
+    def _handle_boarding(self, patient, target_unit: str):
+        """
+        If no bed is available, board the patient until available, or escalate.
+        """
+        self.log_event(patient, f"start_boarding_{target_unit}")
+        self.boarding_count += 1
+
+        wait_start = self.env.now
+        resource = self.icu if target_unit == "ICU" else self.medsurg
+        bed = yield resource.occupy_bed()
+        wait_time = self.env.now - wait_start
+
+        self.total_boarding_time += wait_time
+        self.log_event(patient, f"end_boarding_{target_unit}")
+        return bed
+
+
+
+ 
+
+
     # -------------------------------
     # 4A. Action Application
     # -------------------------------
-    def apply_action(self, action_vector):
+    def apply_action(self, action: dict):
         """
-        Decode an 8-dim action vector and apply adjustments.
-        Action vector indices:
-          0: ICU bed adjustment (integer, e.g. -2..+2)
-          1: MedSurg bed adjustment (integer, e.g. -2..+2)
-          2: Day nurse adjustment (integer, e.g. -5..+5)
-          3: Night nurse adjustment (integer, e.g. -3..+3)
-          4: Overflow flag (0 or 1)
-          5: Transfer flag (0 or 1)
-          6: Discharge acceleration (0-3)
-          7: Ambulance diversion flag (0 or 1)
+        Apply a hierarchical action dict with both strategic and tactical controls.
+        Expects keys:
+        • icu_adjustment           (int): Δ in ICU beds
+        • ms_adjustment            (int): Δ in MedSurg beds
+        • nurse_day_adjustment     (int): Δ in day‑shift nurses
+        • nurse_night_adjustment   (int): Δ in night‑shift nurses
+        • overflow_flag           (bool)
+        • transfer_flag           (bool)
+        • triage_threshold        (float, 0.0–1.0)
+        • ambulance_diversion_rate(float, 0.0–1.0)
+        • discharge_acceleration  (int, optional)
         """
-        if len(action_vector) < 8:
-            raise ValueError("Action vector must have at least 8 dimensions.")
-        decoded = {
-            'icu_adjustment': int(action_vector[0]),
-            'ms_adjustment': int(action_vector[1]),
-            'nurse_day_adjustment': int(action_vector[2]),
-            'nurse_night_adjustment': int(action_vector[3]),
-            'overflow_flag': bool(action_vector[4]),
-            'transfer_flag': bool(action_vector[5]),
-            'discharge_acceleration': int(action_vector[6]),
-            'ambulance_diversion': bool(action_vector[7])
-        }
+        # 1) Unpack everything, with safe defaults
+        icu_adj     = int(action.get("icu_adjustment", 0))
+        ms_adj      = int(action.get("ms_adjustment", 0))
+        day_adj     = int(action.get("nurse_day_adjustment", 0))
+        night_adj   = int(action.get("nurse_night_adjustment", 0))
+        overflow    = bool(action.get("overflow_flag", False))
+        transfer    = bool(action.get("transfer_flag", False))
+        triage_thr  = float(action.get("triage_threshold", 0.0))
+        diversion   = float(action.get("ambulance_diversion_rate", 0.0))
+        disc_acc    = int(action.get("discharge_acceleration", 0))
+
         if self.debug:
-            print("[ACTION APPLY] Decoded action:", decoded)
-        
-        # Apply adjustments for ICU:
-        new_icu_capacity = self.scenario.n_icu_beds + decoded['icu_adjustment']
-        new_icu_capacity = max(0, new_icu_capacity)
-        diff_icu = new_icu_capacity - self.icu.capacity
-        if diff_icu > 0:
-            for i in range(diff_icu):
+            print("[ACTION APPLY] Strategic  → ICU Δ:", icu_adj,
+                "MS Δ:", ms_adj,
+                "| Nurses Δ:", day_adj, night_adj)
+            print("[ACTION APPLY] Tactical  → overflow:", overflow,
+                "transfer:", transfer,
+                "triage_thr:", triage_thr,
+                "diversion_rate:", diversion,
+                "disc_acc:", disc_acc)
+
+        # 2) ICU capacity
+        new_icu_cap = max(0, self.scenario.n_icu_beds + icu_adj)
+        diff = new_icu_cap - self.icu.capacity
+        if diff > 0:
+            for i in range(diff):
                 self.icu.store.put(f"ICU_Bed_Extra_{i+100}")
-        elif diff_icu < 0:
-            remove_count = abs(diff_icu)
-            for _ in range(remove_count):
-                if len(self.icu.store.items) > 0:
-                    self.icu.store.get_nowait()
-        self.icu.capacity = new_icu_capacity
+        elif diff < 0:
+            for _ in range(-diff):
+                if self.icu.store.items:
+                    self.icu.store.items.pop()
+        self.icu.capacity = new_icu_cap
 
-        # MedSurg adjustments:
-        new_ms_capacity = self.scenario.n_medsurg_beds + decoded['ms_adjustment']
-        new_ms_capacity = max(0, new_ms_capacity)
-        diff_ms = new_ms_capacity - self.medsurg.capacity
-        if diff_ms > 0:
-            for i in range(diff_ms):
+        # 3) MedSurg capacity
+        new_ms_cap = max(0, self.scenario.n_medsurg_beds + ms_adj)
+        diff = new_ms_cap - self.medsurg.capacity
+        if diff > 0:
+            for i in range(diff):
                 self.medsurg.store.put(f"MedSurg_Bed_Extra_{i+100}")
-        elif diff_ms < 0:
-            remove_count = abs(diff_ms)
-            for _ in range(remove_count):
-                if len(self.medsurg.store.items) > 0:
-                    self.medsurg.store.get_nowait()
-        self.medsurg.capacity = new_ms_capacity
+        elif diff < 0:
+            for _ in range(-diff):
+                if self.medsurg.store.items:
+                    self.medsurg.store.items.pop()
+        self.medsurg.capacity = new_ms_cap
 
-        # Adjust nurse resource.
+        # 4) Nurse staffing
         current_hour = int((self.env.now // 60) % 24)
         if 7 <= current_hour < 19:
-            new_nurse = self.scenario.day_shift_nurses + decoded['nurse_day_adjustment']
+            base = self.scenario.day_shift_nurses
+            new_nurses = base + day_adj
         else:
-            new_nurse = self.scenario.night_shift_nurses + decoded['nurse_night_adjustment']
-        new_nurse = max(0, new_nurse)
-        self.nurses = simpy.Resource(self.env, capacity=new_nurse)
+            base = self.scenario.night_shift_nurses
+            new_nurses = base + night_adj
+        new_nurses = max(0, new_nurses)
+        self.nurses = simpy.Resource(self.env, capacity=new_nurses)
 
-        # Set remaining flags:
-        self.overflow_allowed = decoded['overflow_flag']
-        self.transfer_allowed = decoded['transfer_flag']
-        self.discharge_acceleration = decoded['discharge_acceleration']
-        self.ambulance_diversion = decoded['ambulance_diversion']
-        
-        # Log application:
+        # 5) Tactical flags & thresholds
+        self.overflow_allowed            = overflow
+        self.transfer_allowed            = transfer
+        self.triage_threshold            = triage_thr
+        self.ambulance_diversion_rate    = diversion
+        # If you still need a boolean ambulance_diversion flag:
+        self.ambulance_diversion         = (diversion > 0.5)
+        self.discharge_acceleration      = disc_acc
+
         if self.debug:
-            print("[ACTION APPLY] Updated ICU capacity:", self.icu.capacity)
-            print("[ACTION APPLY] Updated MedSurg capacity:", self.medsurg.capacity)
-            print("[ACTION APPLY] Updated Nurse capacity:", self.nurses.capacity)
+            print("[ACTION APPLY] New capacities → ICU:", self.icu.capacity,
+                "MedSurg:", self.medsurg.capacity,
+                "Nurses:", self.nurses.capacity)
+            print("[ACTION APPLY] overflow_allowed:", self.overflow_allowed,
+                "transfer_allowed:", self.transfer_allowed,
+                "triage_threshold:", self.triage_threshold,
+                "diversion_rate:", self.ambulance_diversion_rate,
+                "discharge_acceleration:", self.discharge_acceleration)
 
     # -------------------------------
     # 4B. Arrivals Generator
     # -------------------------------
     def arrivals_generator(self):
-        for pid in itertools.count(1):
+        pid_counter = itertools.count(1)
+        for _ in pid_counter:
             if self.env.now >= self.scenario.simulation_time:
                 break
-            current_hour = int((self.env.now // 60) % 24)
-            base_rate = self.scenario.arrival_profile[current_hour]
-            effective_rate = base_rate * (0.5 if self.ambulance_diversion else 1.0)
-            mean_iat = 60.0 / effective_rate if effective_rate > 0 else 9999
-            iat = np.random.exponential(mean_iat)
+
+            # 1) Sample inter‑arrival from empirical λ-hour
+            hr      = int((self.env.now // 60) % 24)
+            lam     = self.scenario.arrival_profile[hr]
+            eff_lam = lam * (1.0 - getattr(self, "ambulance_diversion_rate", 0.0))
+            iat     = np.random.exponential(60.0 / max(eff_lam, 1e-6))
             if self.debug:
-                print(f"[ARRIVAL] Hour {current_hour}, rate={base_rate} ({'diversion' if self.ambulance_diversion else 'normal'}), IAT={iat:.2f} min")
+                print(f"[ARRIVAL] hour={hr}, λ={lam:.2f}, eff={eff_lam:.2f}, iat={iat:.1f}")
+
             yield self.env.timeout(iat)
-            severity = np.random.randint(1, 4)
-            pat = Patient(pid=self.pid_counter, arrival_time=self.env.now, severity=severity)
+
+            # 2) Sample acuity from empirical distribution
+            severity = np.random.choice([1, 2, 3], p=self.scenario.severity_probs)
+
+            # 3) Triage gate (low‐acuity reject)
+            if severity == 1 and random.random() < getattr(self, "triage_threshold", 0.0):
+                self.lwbs_count += 1
+                self.event_log.append({
+                    'time':       self.env.now,
+                    'patient_id': self.pid_counter,
+                    'event':      'triage_reject',
+                    'severity':   severity
+                })
+                self.pid_counter += 1
+                continue
+
+            # 4) Admit patient to ED flow
+            pat = Patient(pid=self.pid_counter,
+                          arrival_time=self.env.now,
+                          severity=severity)
             self.pid_counter += 1
             self.patients.append(pat)
-            # For now, we simulate a direct discharge from ED after ED treatment time.
             self.env.process(self.process_ed_flow(pat))
             self.event_log.append({
-                'time': self.env.now,
+                'time':       self.env.now,
                 'patient_id': pat.pid,
-                'event': 'arrival',
-                'severity': severity
+                'event':      'arrival',
+                'severity':   severity
             })
+
 
     def process_ed_flow(self, patient: Patient):
         """
-        ED processing that differentiates severity 1, 2, and 3:
-        - severity 3 => Attempt ICU if bed is free, else board/transfer
-        - severity 1 or 2 => typical 70% discharge, 30% ward
+        ED processing: request an ED bed, treat the patient, and then decide on next steps.
+        Uses severity-adjusted lognormal LOS and probabilistic routing.
         """
-        # Predefine severity_factor to avoid errors
-        severity_factor = {1: 0.8, 2: 1.0, 3: 1.5}
+        severity_factor = self.get_severity_multiplier(patient.severity)
 
-        # Request an ED bed (simple resource request)
+        # Request an ED bed with timeout (simulating LWBS if patient waits too long)
         req = self.ed.request()
-        result = yield req | self.env.timeout(120)
+        result = yield req | self.env.timeout(120)  # 2-hour wait threshold
         if req not in result:
             self.lwbs_count += 1
-            self.event_log.append({
-                'time': self.env.now,
-                'patient_id': patient.pid,
-                'event': 'lwbs'
-            })
+            self.log_event(patient, "lwbs")
             return
 
-        # Got an ED bed; simulate ED treatment:
+        self.log_event(patient, "ed_admit")
         patient.start_treatment = self.env.now
 
-        base_treatment = np.random.exponential(self.scenario.ed_treatment_mean * 60)
-        adjusted_treatment = base_treatment * severity_factor.get(patient.severity, 1.0)
-        treatment_time = adjusted_treatment * max(0, 1 - 0.1 * self.discharge_acceleration)
+        # 🔁 Use severity-driven log-normal LOS instead of ed_treatment_mean
+        mu, sigma = self.scenario.los_params[patient.severity]
+        t_ed = np.random.lognormal(mu, sigma)
 
-        yield self.env.timeout(treatment_time)
+        # Adjust for nurse fatigue and severity
+        t_ed *= severity_factor
+        t_ed *= self.nurse_fatigue
+
+        yield self.env.timeout(t_ed)
         patient.end_treatment = self.env.now
-
-        # Release ED bed:
         self.ed.release(req)
+        self.log_event(patient, "ed_complete")
 
-        # Decision logic:
-        if patient.severity == 3:
-            # Attempt ICU
-            if self.icu.bed_available():
-                bed = yield self.icu.occupy_bed()
-                self.icu_admits += 1
-                # ICU LOS
-                icu_time = np.random.exponential(self.scenario.icu_los_mean) * severity_factor[3]
-                icu_time *= max(0, 1 - 0.1 * self.discharge_acceleration)
-                yield self.env.timeout(icu_time)
-                yield self.icu.free_bed(bed)
+        # Probabilistic routing: Discharge vs ICU vs Ward
+        p_discharge, p_icu, p_ward = self._get_disposition_probs(patient.severity)
+        r = np.random.random()
 
-                # Finally discharge
-                patient.discharge_time = self.env.now
-                self.discharge_count += 1
-                self.event_log.append({
-                    'time': self.env.now,
-                    'patient_id': patient.pid,
-                    'event': 'icu_discharge'
-                })
-            else:
-                # Board or Transfer
-                self.boarded_count += 1
-                self.event_log.append({
-                    'time': self.env.now,
-                    'patient_id': patient.pid,
-                    'event': 'boarding'
-                })
-                # For demonstration, board X minutes, then forced transfer
-                board_time = 60 * severity_factor[3]  # e.g. 90 if severity 3
-                yield self.env.timeout(board_time)
-
-                self.transferred_out += 1
-                self.event_log.append({
-                    'time': self.env.now,
-                    'patient_id': patient.pid,
-                    'event': 'transfer_out'
-                })
+        if r < p_discharge:
+            yield from self.complete_discharge(patient, source="ed")
+        elif r < p_discharge + p_icu:
+            yield from self.process_icu_flow(patient)
         else:
-            # severity 1 or 2 => typical 70% discharge, 30% ward
-            if np.random.random() < 0.7:
-                discharge_delay = np.random.exponential(15 * severity_factor.get(patient.severity, 1.0))
-                patient.discharge_time = self.env.now + discharge_delay
-                self.discharge_count += 1
-                self.event_log.append({
-                    'time': self.env.now,
-                    'patient_id': patient.pid,
-                    'event': 'discharge'
-                })
-            else:
-                if self.medsurg.bed_available():
-                    bed = yield self.medsurg.store.get()
-                    self.ward_admits += 1
+            yield from self.process_ward_flow(patient)
 
-                    ward_time = np.random.exponential(self.scenario.ms_los_mean)
-                    ward_time *= severity_factor.get(patient.severity, 1.0)
-                    ward_time *= max(0, (1 - 0.1 * self.discharge_acceleration))
-                    yield self.env.timeout(ward_time)
 
-                    yield self.medsurg.store.put(bed)
-                    patient.discharge_time = self.env.now
-                    self.discharge_count += 1
-                    self.event_log.append({
-                        'time': self.env.now,
-                        'patient_id': patient.pid,
-                        'event': 'ward_discharge'
-                    })
-                else:
-                    self.boarded_count += 1
-                    self.event_log.append({
-                        'time': self.env.now,
-                        'patient_id': patient.pid,
-                        'event': 'boarding'
-                    })
-                    yield self.env.timeout(60)
-                    self.transferred_out += 1
-                    self.event_log.append({
-                        'time': self.env.now,
-                        'patient_id': patient.pid,
-                        'event': 'transfer'
-                    })
+    def process_icu_flow(self, patient: Patient):
+        patient.current_unit = "ICU"
+        self.log_event(patient, "icu_request")
+
+
+        bed = yield from self.try_transfer_or_board(patient, target_unit="ICU")
+        if bed is None:
+            return  # patient was transferred out
+
+
+        self.icu_admits += 1
+        self.log_event(patient, "icu_admit")
+
+        # Draw LOS from empirical log‑normal
+        mu, sigma = self.scenario.los_params[patient.severity]
+        icu_los    = np.random.lognormal(mean=mu, sigma=sigma)
+
+        # Apply severity multiplier & nurse fatigue
+        icu_los *= self.get_severity_multiplier(patient.severity)
+        icu_los *= self.nurse_fatigue
+
+        # Discharge acceleration: 10% per step, floor at 50%
+        factor = max(0.5, 1.0 - 0.1 * self.discharge_acceleration)
+        icu_los *= factor
+
+        yield self.env.timeout(icu_los)
+
+        yield self.icu.free_bed(bed)
+        self.log_event(patient, "icu_discharge")
+
+        # Step down to ward
+        yield from self.process_ward_flow(patient)
+
+
+        
+
+    def process_ward_flow(self, patient: Patient):
+        patient.current_unit = "Ward"
+        self.log_event(patient, "ward_request")
+
+        bed = yield from self.try_transfer_or_board(patient, target_unit="Ward")
+        if bed is None:
+            return  # patient was transferred out
+
+
+
+        self.ward_admits += 1
+        self.log_event(patient, "ward_admit")
+
+        # Draw LOS from empirical log‑normal
+        mu, sigma = self.scenario.los_params[patient.severity]
+        ward_los   = np.random.lognormal(mean=mu, sigma=sigma)
+
+        # Apply severity multiplier & nurse fatigue
+        ward_los *= self.get_severity_multiplier(patient.severity)
+        ward_los *= self.nurse_fatigue
+
+        # Discharge acceleration factor
+        factor = max(0.5, 1.0 - 0.1 * self.discharge_acceleration)
+        ward_los *= factor
+
+        yield self.env.timeout(ward_los)
+
+        yield self.medsurg.free_bed(bed)
+        yield from self.complete_discharge(patient, source="ward")
+
+
+
+
+
+    #STEPPING
+        
+    def step(self, action):
+        self.apply_action(action)
+        next_shift = self.env.now + self.scenario.shift_length
+        self.run(until=next_shift)
+
+        obs    = self.get_obs()
+        reward = self.calculate_multiobj_reward()   # now a vector
+        done   = self.env.now >= self.scenario.simulation_time
+        info   = self.get_patient_flow_summary()
+
+        return obs, reward, done, False, info
+
+    
+    def calculate_multiobj_reward(self):
+        # Objective 1: Throughput (discharges)
+        throughput = float(self.discharge_count)
+
+        # Objective 2: Wait penalties (LWBS + boarded)
+        wait_penalty = float(self.lwbs_count + self.boarded_count)
+
+        # Objective 3: Staff fatigue penalty
+        fatigue_penalty = self.nurse_fatigue  # composite factor
+
+        # Objective 4: Average utilization (ED)
+        utils = [u['ed_in_use'] for u in self.utilisation_log]
+        avg_util = float(sum(utils) / max(len(utils), 1))
+
+        # Return as a vector: higher is better for first & fourth, lower is better for penalties
+        return np.array([throughput, -wait_penalty, -fatigue_penalty, avg_util], dtype=np.float32)
+
+
+
+
+
+    # -------------------------------
+    # Discharge 
+    # ------------------------------- 
+                                       
+    def complete_discharge(self, patient: Patient, source="discharge"):
+        """
+        Mark the patient as discharged, update counters, and log the event.
+        """
+        patient.status = "discharged"
+        patient.current_unit = "Exit"
+        patient.discharge_time = self.env.now
+        self.discharge_count += 1
+        self.log_event(patient, f"{source}_discharge")
+        # Yield a 0-time event so it becomes a generator
+        yield self.env.timeout(0)
+
+
+
 
 
     def _get_disposition_probs(self, severity):
@@ -420,30 +676,104 @@ class HospitalFlowModel:
             return (0.30, 0.50, 0.20)
 
 
-    def _handle_boarding(self, patient: Patient, target_unit_name: str):
-        """
-        For demonstration: patient boards for some time scaled by severity,
-        then is 'transferred_out'. In a real flow, they'd wait for bed frees.
-        """
-        severity_factor = {1: 0.8, 2: 1.0, 3: 1.5}
-        self.boarded_count += 1
 
-        self.event_log.append({
-            'time': self.env.now,
-            'patient_id': patient.pid,
-            'event': 'boarding',
-            'target_unit': target_unit_name
-        })
+    # -------------------------------
+    # Log 
+    # -------------------------------
+    def log_event(self, patient, event):
+        """Log an event with timestamp, event name, patient id, severity, and current unit."""
+        log = {
+            "time": round(self.env.now, 2),
+            "event": event,
+            "pid": patient.pid,
+            "severity": patient.severity,
+            "unit": patient.current_unit
+        }
+        patient.event_log.append(log)
+        self.event_log.append(log)
 
-        board_time = 60.0 * severity_factor.get(patient.severity, 1.0)  # e.g. 60-90 min
-        yield self.env.timeout(board_time)
 
-        self.transferred_out += 1
-        self.event_log.append({
-            'time': self.env.now,
-            'patient_id': patient.pid,
-            'event': 'transfer'
-        })
+    def get_obs(self):
+        now = self.env.now
+
+        # Bed occupancy and queue lengths
+        ed_in_use   = self.ed.beds_in_use()
+        icu_in_use  = self.icu.beds_in_use()
+        ward_in_use = self.medsurg.beds_in_use()
+        ed_queue    = self.scenario.n_ed_beds   - self.ed.available_beds()
+        icu_queue   = self.scenario.n_icu_beds  - self.icu.available_beds()
+        ward_queue  = self.scenario.n_medsurg_beds - self.medsurg.available_beds()
+        ed_queue_len  = len(self.ed.store.get_queue)
+        icu_queue_len = len(self.icu.store.get_queue)
+        ward_queue_len= len(self.medsurg.store.get_queue)
+
+
+        # Recent arrival rate (last 60 min)
+        arrivals_last_hour = sum(
+            1 for e in self.event_log
+            if e["event"] == "arrival" and now - e["time"] <= 60
+        )
+        avg_arrival_rate = arrivals_last_hour / 60.0  # per minute
+
+        # Rolling utilization (mean ED occupancy over last N audits)
+        recent_utils = [
+            u['ed_in_use'] for u in self.utilisation_log
+            if now - u['time'] <= 120  # last 2 h
+        ]
+        avg_ed_util = sum(recent_utils) / max(len(recent_utils), 1)
+
+        # Time‑of‑day feature
+        hour_of_day = (now // 60) % 24
+
+        return np.array([
+            ed_in_use, icu_in_use, ward_in_use,
+            ed_queue_len, icu_queue_len, ward_queue_len,
+            avg_arrival_rate, avg_ed_util, hour_of_day
+        ], dtype=np.float32)
+
+
+    
+    def get_patient_flow_summary(self):
+        summary = {
+            "n_total": len(self.patients),
+            "n_discharged": self.discharge_count,
+            "n_transferred": self.transferred_out,
+            "n_boarded": self.boarded_count,
+            "n_lwbs": self.lwbs_count,
+            "avg_total_time": 0.0,
+            "avg_boarding_time": 0.0,
+            "avg_wait_time": 0.0
+        }
+
+        durations, boarding_times, wait_times = [], [], []
+
+        for p in self.patients:
+            if hasattr(p, "discharge_time") and p.discharge_time and p.arrival_time:
+                durations.append(p.discharge_time - p.arrival_time)
+
+            arrival, treatment_start, boarding_start = None, None, None
+            for e in p.event_log:
+                if e["event"] == "arrival":
+                    arrival = e["time"]
+                elif e["event"] == "start_treatment":
+                    treatment_start = e["time"]
+                elif e["event"] == "boarding":
+                    boarding_start = e["time"]
+                elif e["event"] == "transfer" and boarding_start is not None:
+                    boarding_times.append(e["time"] - boarding_start)
+
+            if arrival and treatment_start:
+                wait_times.append(treatment_start - arrival)
+
+        if durations:
+            summary["avg_total_time"] = np.mean(durations)
+        if boarding_times:
+            summary["avg_boarding_time"] = np.mean(boarding_times)
+        if wait_times:
+            summary["avg_wait_time"] = np.mean(wait_times)
+
+        return summary
+
 
 
 
@@ -472,19 +802,43 @@ class HospitalFlowModel:
             self.utilisation_log.append(record)
             yield self.env.timeout(interval)
 
+   
+    
     def snapshot_state(self):
-        snap = {
-            'time': self.env.now,
-            'ed_in_use': self.ed.beds_in_use(),
-            'icu_available': len(self.icu.store.items),
-            'medsurg_available': len(self.medsurg.store.items),
-            'nurses_available': self.nurses.capacity - self.nurses.count,
-            'discharge_count': self.discharge_count,
-            'lwbs_count': self.lwbs_count,
-            'boarded_count': self.boarded_count,
-            'transferred_out': self.transferred_out
+        """
+        Returns a snapshot of the current simulation state to be used for front-end visualization 
+        or by planners. Includes key metrics and logs.
+        """
+        return {
+            "time": self.env.now,
+            "patients": [vars(p) for p in self.patients],
+            "ed_in_use": self.ed.beds_in_use(),  # Number of ED beds in use
+            "icu_occupancy": self.icu.beds_in_use(),  # ICU beds in use
+            "ward_occupancy": self.medsurg.capacity - len(self.medsurg.store.items) if hasattr(self.medsurg, "store") else None,
+            "nurse_fatigue": self.nurse_fatigue,  # Assuming composite property defined elsewhere
+            "discharge_count": self.discharge_count,
+            "lwbs": self.lwbs_count,
+            "boarded": self.boarded_count,
+            "transfers": self.transferred_out,
+            "event_log": self.event_log[-100:]
         }
-        return snap
+    
+    
+
+    # -------------------------------
+    # RESET
+    # -------------------------------
+                
+
+    def reset(self):
+        """
+        Reinitializes the entire model simulation state.
+        Must be called at the start of every episode.
+        """
+        self.__init__(self.scenario, start_datetime=self.start_datetime, debug=self.debug)
+        return self.get_obs()
+
+
 
     # -------------------------------
     # 4D. Run Function
@@ -501,92 +855,173 @@ class HospitalFlowModel:
 #############################
 class HospitalActionSpace:
     """
-    Defines an 8-dimensional action space.
-    Dimensions:
-      0: ICU bed adjustment (-2 to +2)
-      1: MedSurg bed adjustment (-2 to +2)
-      2: Day nurse adjustment (-5 to +5)
-      3: Night nurse adjustment (-3 to +3)
-      4: Overflow flag (0 or 1)
-      5: Transfer flag (0 or 1)
-      6: Discharge acceleration (0–3)
-      7: Ambulance diversion flag (0 or 1)
+    A two‑tier (strategic + tactical) action space using a Dict.
+    
+    Strategic actions (updated once per shift):
+      • icu_delta      — continuous in [–2.0, +2.0] beds
+      • medsurg_delta  — continuous in [–2.0, +2.0] beds
+      • nurse_day_pct  — continuous in [0.0, 2.0], fraction of base nurses
+      • nurse_night_pct— continuous in [0.0, 2.0]
+    
+    Tactical actions (updated every decision step):
+      • overflow_flag    — discrete {0,1}
+      • transfer_flag    — discrete {0,1}
+      • triage_threshold — continuous [0.0,1.0] (e.g. percentile cutoff)
+      • diversion_rate   — continuous [0.0,1.0] fraction of arrivals
     """
-    def __init__(self):
-        icu_range = (-2,2)
-        ms_range = (-2,2)
-        nurse_day_range = (-5,5)
-        nurse_night_range = (-3,3)
-        self.icu_dim = icu_range[1] - icu_range[0] + 1
-        self.ms_dim = ms_range[1] - ms_range[0] + 1
-        self.nurse_day_dim = nurse_day_range[1] - nurse_day_range[0] + 1
-        self.nurse_night_dim = nurse_night_range[1] - nurse_night_range[0] + 1
-        self.icu_offset = -icu_range[0]
-        self.ms_offset = -ms_range[0]
-        self.nurse_day_offset = -nurse_day_range[0]
-        self.nurse_night_offset = -nurse_night_range[0]
-        self.action_space = spaces.MultiDiscrete([
-            self.icu_dim,
-            self.ms_dim,
-            self.nurse_day_dim,
-            self.nurse_night_dim,
-            2,  # overflow flag
-            2,  # transfer flag
-            4,  # discharge acceleration (0-3)
-            2   # ambulance diversion flag
-        ])
+    def __init__(self, scenario):
+        self.scenario = scenario
+
+        # Strategic: continuous adjustments per shift
+        self.strategic = spaces.Box(
+            low=np.array([-2.0, -2.0, 0.0, 0.0], dtype=np.float32),
+            high=np.array([ 2.0,  2.0, 2.0, 2.0], dtype=np.float32),
+            shape=(4,),
+            dtype=np.float32
+        )
+
+        # Tactical: flags + thresholds each call
+        self.tactical = spaces.Dict({
+            "overflow_flag":    spaces.Discrete(2),
+            "transfer_flag":    spaces.Discrete(2),
+            "triage_threshold": spaces.Box(low=0.0, high=1.0, shape=(1,), dtype=np.float32),
+            "diversion_rate":   spaces.Box(low=0.0, high=1.0, shape=(1,), dtype=np.float32),
+        })
+
+        self.action_space = spaces.Dict({
+            "strategic": self.strategic,
+            "tactical":  self.tactical
+        })
 
     def sample(self):
         return self.action_space.sample()
 
     def decode(self, action):
+        strat = action["strategic"]
+        tact  = action["tactical"]
+
+        # Compute integer bed changes
+        icu_adj     = int(np.round(strat[0]))
+        ms_adj      = int(np.round(strat[1]))
+        # Compute nurse counts as a fraction of base
+        day_nurse   = int(np.round(self.scenario.day_shift_nurses * strat[2]))
+        night_nurse = int(np.round(self.scenario.night_shift_nurses * strat[3]))
+
         return {
-            'icu_adjustment': int(action[0]) - self.icu_offset,
-            'ms_adjustment': int(action[1]) - self.ms_offset,
-            'nurse_day_adjustment': int(action[2]) - self.nurse_day_offset,
-            'nurse_night_adjustment': int(action[3]) - self.nurse_night_offset,
-            'overflow_flag': bool(action[4]),
-            'transfer_flag': bool(action[5]),
-            'discharge_acceleration': int(action[6]),
-            'ambulance_diversion': bool(action[7])
+            # Strategic
+            "icu_adjustment":        icu_adj,
+            "ms_adjustment":         ms_adj,
+            "nurse_day_adjustment":  day_nurse   - self.scenario.day_shift_nurses,
+            "nurse_night_adjustment":night_nurse - self.scenario.night_shift_nurses,
+
+            # Tactical
+            "overflow_flag":    bool(tact["overflow_flag"]),
+            "transfer_flag":    bool(tact["transfer_flag"]),
+            "triage_threshold": float(tact["triage_threshold"][0]),
+            "ambulance_diversion_rate": float(tact["diversion_rate"][0])
         }
 
-#############################
-# 6. Main Runner for Debugging
-#############################
+        
+
+
+# ------------------------------------------------------------------
+# 7.  Baseline / Heuristic Policies
+# ------------------------------------------------------------------
+def reactive_policy(state, scenario):
+    """
+    Simple queue‑aware heuristic that toggles overflow, diversion,
+    and capacity deltas when ED congestion exceeds thresholds.
+    """
+    ed_in_use     = state[0]
+    icu_in_use    = state[1]
+    ward_in_use   = state[2]
+    ed_queue_len  = state[3]
+
+    icu_avail  = scenario.n_icu_beds  - icu_in_use
+    ward_avail = scenario.n_medsurg_beds - ward_in_use
+
+    return {
+        # strategic
+        "icu_adjustment":  +1 if icu_avail == 0 else 0,
+        "ms_adjustment":   +1 if ward_avail < 2 else 0,
+        "nurse_day_adjustment":  +3 if ed_queue_len > 10 else 0,
+        "nurse_night_adjustment": 0,
+        # tactical
+        "overflow_flag":            ed_queue_len > 5,
+        "transfer_flag":            ed_queue_len > 8,
+        "triage_threshold":         0.4 if ed_queue_len > 8 else 0.2,
+        "ambulance_diversion_rate": min(1.0, 0.05 * max(ed_queue_len - 5, 0)),
+        "discharge_acceleration":   2 if ward_avail < 2 else 0,
+    }
+
+# ------------------------------------------------------------------
+# Debug runner – heuristic policy vs. no‑control baseline
+# ------------------------------------------------------------------
 if __name__ == "__main__":
-    # For debugging purposes:
-    print("=== Hospital Simulation Debug Runner ===")
-    # Create a scenario with a shorter simulation time (e.g., 10 hours)
-    scenario = Scenario(simulation_time=60*10, n_icu_beds=4, n_medsurg_beds=10,
-                        day_shift_nurses=10, night_shift_nurses=5, ed_treatment_mean=2.0)
-    # Create the HospitalFlowModel instance
+    from pprint import pprint
+    import datetime, time
+
+    print("=== Hospital Simulation Debug Runner (7‑day test) ===")
+
+    scenario = Scenario(
+        simulation_time    = 60 * 24 * 7,
+        n_ed_beds          = 15,
+        n_icu_beds         = 4,
+        n_medsurg_beds     = 10,
+        day_shift_nurses   = 10,
+        night_shift_nurses = 5,
+        arrival_profile    = LAMBDA_HOUR,
+        severity_probs     = SEVERITY_PROBS,
+        los_params         = LOS_PARAMS
+    )
+
     model = HospitalFlowModel(scenario, start_datetime=datetime.datetime.now(), debug=True)
-    
-    # Create the action space object and sample an action.
-    action_space_obj = HospitalActionSpace()
-    sample_action = action_space_obj.sample()
-    decoded_action = action_space_obj.decode(sample_action)
-    print("Sample raw action vector:", sample_action)
-    print("Decoded action:", decoded_action)
-    
-    # Apply the action to the model.
-    model.apply_action(sample_action)
-    
-    # Run the model until 3 days (4320 minutes) for testing.
-    model.run(until=60*24*3)
-    
-    # Print snapshot of the system state.
+
+    # 3) Run the heuristic policy, one shift at a time
+    shift_len = scenario.shift_length     # 8 h ⇒ 480 min
+    while model.env.now < scenario.simulation_time:
+        # a) Observe
+        obs = model.get_obs()
+
+        # b) Choose action (reactive heuristic)
+        action = reactive_policy(obs, scenario)
+
+        # c) Apply action
+        model.apply_action(action)
+
+        # d) Advance one shift
+        model.run(until = model.env.now + shift_len)
+
+    # 4) Snapshot results
     snap = model.snapshot_state()
-    print("=== Simulation Snapshot at t =", snap['time'], "minutes ===")
+    print(f"\n=== Simulation Snapshot at t = {snap['time']:.0f} min ===")
     print("ED in use:", snap['ed_in_use'])
-    print("ICU available:", snap['icu_available'])
-    print("MedSurg available:", snap['medsurg_available'])
-    print("Nurses available:", snap['nurses_available'])
-    print("Discharge count:", snap['discharge_count'])
-    print("LWBS count:", snap['lwbs_count'])
-    print("Boarded count:", snap['boarded_count'])
-    print("Transferred out:", snap['transferred_out'])
-    print("=== Event Log Summary (first 10 events) ===")
-    for event in model.event_log[:10]:
-        print(event)
+    print("ICU in use:", snap['icu_occupancy'])
+    print("Ward in use:", snap['ward_occupancy'])
+    print("Nurse‑fatigue index:", snap['nurse_fatigue'])
+    print("Discharged:", snap['discharge_count'],
+          "| LWBS:", snap['lwbs'],
+          "| Boarded:", snap['boarded'],
+          "| Transfers:", snap['transfers'])
+
+    print("\n=== Recent Event Log (last 10) ===")
+    for event in snap['event_log'][-10:]:
+        pprint(event)
+
+    # 5) Observation & flow summary
+    obs_now = model.get_obs()
+    print("\n=== Final Observation Vector ===")
+    pprint(obs_now)
+
+    flow_summary = model.get_patient_flow_summary()
+    print("\n=== Patient‑flow Summary ===")
+    pprint(flow_summary)
+
+    # 6) Reset sanity‑check
+    print("\n=== Reset Test ===")
+    print("Obs before reset:", obs_now)
+    obs_reset = model.reset()
+    print("Obs after  reset:", obs_reset)
+
+    # Pause so you can read the terminal
+    time.sleep(2)
