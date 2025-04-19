@@ -97,8 +97,8 @@ class Scenario:
         self.night_shift_nurses = night_shift_nurses
 
         # 2. Arrival & severity profile
-        self.arrival_profile = arrival_profile or [1.0] * 24
-        self.severity_probs  = severity_probs  or [1/3, 1/3, 1/3]
+        self.arrival_profile = arrival_profile
+        self.severity_probs  = severity_probs 
 
         # ────────────────────────────────────────────────
         # 3. Empirical LOS: load CSV & compute log‑normal
@@ -344,8 +344,8 @@ class HospitalFlowModel:
     def try_transfer_or_board(self, patient, target_unit: str):
         """
         Try to admit the patient to the target unit.
-        If unavailable, either board the patient or transfer out.
-        Returns: SimPy resource (bed) or None if transferred.
+        If unavailable, board the patient and wait until a bed is free.
+        Returns: SimPy resource (bed) or None if transferred out.
         """
         self.log_event(patient, f"{target_unit.lower()}_request")
 
@@ -356,31 +356,42 @@ class HospitalFlowModel:
         else:
             raise ValueError(f"Unknown unit: {target_unit}")
 
-        if not resource.bed_available():
-            yield from self._handle_boarding(patient, target_unit=target_unit)
-            return None  # Transferred out or abandoned
+        # ✅ Try immediate bed assignment
+        if resource.bed_available():
+            bed = yield resource.occupy_bed()
+            return bed
 
-        bed = yield resource.occupy_bed()
+        # ❌ No bed available: board OR transfer logic
+        # Boarding now waits until a bed becomes free and returns it
+        bed = yield from self._handle_boarding(patient, target_unit=target_unit)
+
+        if bed is None:
+            self.transferred_out += 1
+            self.log_event(patient, "transfer_out", unit=target_unit)
+            return None
+
         return bed
+
+
     
     
     def _handle_boarding(self, patient, target_unit: str):
         """
-        If no bed is available, board the patient until available, or escalate.
+        If no bed is available, board the patient until available.
         """
-        self.log_event(patient, f"start_boarding_{target_unit}")
         self.boarded_count += 1
-
-        # ✅ Set this now so you can calculate wait time later
         patient.boarding_start_time = self.env.now
+        self.log_event(patient, "boarding", unit=target_unit)
 
         resource = self.icu if target_unit == "ICU" else self.medsurg
         bed = yield resource.occupy_bed()
-        wait_time = self.env.now - patient.boarding_start_time
 
+        wait_time = self.env.now - patient.boarding_start_time
         self.total_boarding_time += wait_time
+
         self.log_event(patient, f"end_boarding_{target_unit}")
         return bed
+
 
 
 
@@ -490,48 +501,35 @@ class HospitalFlowModel:
                 break
 
             # 1) Sample inter‑arrival from empirical λ-hour
-            hr      = int((self.env.now // 60) % 24)
-            lam     = self.scenario.arrival_profile[hr]
+            hr = int((self.env.now // 60) % 24)
+            lam = self.scenario.arrival_profile[hr]
             eff_lam = lam * (1.0 - getattr(self, "ambulance_diversion_rate", 0.0))
-            iat     = np.random.exponential(60.0 / max(eff_lam, 1e-6))
+            iat = np.random.exponential(60.0 / max(eff_lam, 1e-6))
             if self.debug:
                 print(f"[ARRIVAL] hour={hr}, λ={lam:.2f}, eff={eff_lam:.2f}, iat={iat:.1f}")
 
             yield self.env.timeout(iat)
 
-            # 2) Sample acuity from empirical distribution
+            # 2) Sample severity from profile
             severity = np.random.choice([1, 2, 3, 4, 5], p=self.scenario.severity_probs)
 
-            # 3) Triage gate (low‐acuity reject)
+            # 3) Triage gate (low‐acuity rejection)
             if severity == 1 and random.random() < getattr(self, "triage_threshold", 0.0):
                 self.lwbs_count += 1
-                self.event_log.append({
-                    'time':       self.env.now,
-                    'patient_id': self.pid_counter,
-                    'event':      'triage_reject',
-                    'severity':   severity
-                })
+                # Triage reject event
+                dummy = Patient(pid=self.pid_counter, arrival_time=self.env.now, severity=severity)
+                self.log_event(dummy, "triage_reject")
                 self.pid_counter += 1
                 continue
 
-            # 4) Admit patient to ED flow
-            pat = Patient(pid=self.pid_counter,
-                          arrival_time=self.env.now,
-                          severity=severity)
-            pat.event_log.append({
-                'time': self.env.now,
-                'event': 'arrival' 
-            })
-            self.pid_counter += 1
+            # 4) Create and register new patient
+            pat = Patient(pid=self.pid_counter, arrival_time=self.env.now, severity=severity)
             self.patients.append(pat)
+            self.log_event(pat, "arrival")  # ✅ Log with structure
 
+            self.pid_counter += 1
             self.env.process(self.process_ed_flow(pat))
-            self.event_log.append({
-                'time':       self.env.now,
-                'patient_id': pat.pid,
-                'event':      'arrival',
-                'severity':   severity
-            })
+
 
 
     # HELPER
@@ -562,26 +560,27 @@ class HospitalFlowModel:
         """
         # 1) Attempt to get an ED bed (timeout ⇒ LWBS)
         req = self.ed.request()
-        result = yield req | self.env.timeout(120)
+        result = yield req | self.env.timeout(120)  # max wait before LWBS
+
         if req not in result:
             self.lwbs_count += 1
             self.log_event(patient, "lwbs")
             return
 
-        # 2) Admit & log start of treatment
+        # 2) Patient admitted to ED → treatment starts now
         self.log_event(patient, "start_treatment")
         patient.start_treatment = self.env.now
 
-        # 3) Sample ED LOS (empirical)
+        # 3) Empirical length of stay in ED
         ed_los = self.sample_los("ED", patient.severity)
         yield self.env.timeout(ed_los)
 
-        # 4) Complete treatment
+        # 4) Complete ED stay
         patient.end_treatment = self.env.now
         self.ed.release(req)
         self.log_event(patient, "ed_complete")
 
-        # 5) Route onward
+        # 5) Route to next unit
         p_discharge, p_icu, p_ward = self._get_disposition_probs(patient.severity)
         r = np.random.random()
 
@@ -594,63 +593,80 @@ class HospitalFlowModel:
 
 
 
+
     def process_icu_flow(self, patient: Patient):
         """
-        ICU processing: request/board if needed, then LOS and step-down to Ward.
+        ICU processing: request/board if needed, LOS, and disposition: 
+        → Ward, Transfer-Out, or Discharge (probabilistically).
         """
         patient.current_unit = "ICU"
-
-        # 1. Log request for ICU
         self.log_event(patient, "icu_request")
 
-        # 2. Attempt admission (may involve boarding)
+        # Attempt ICU admission or boarding
         bed = yield from self.try_transfer_or_board(patient, target_unit="ICU")
         if bed is None:
-            return  # Patient was transferred out due to lack of capacity
+            self.transferred_out += 1
+            self.log_event(patient, "transfer_out", unit="ICU")
+            return
 
-        # 3. Admission successful
         self.icu_admits += 1
         self.log_event(patient, "icu_admit")
 
-        # 4. Length of Stay (empirical)
         icu_los = self.sample_los("ICU", patient.severity)
         yield self.env.timeout(icu_los)
 
-        # 5. Release ICU bed
         yield self.icu.free_bed(bed)
         self.log_event(patient, "icu_discharge")
 
-        # 6. Step-down to Ward
-        yield from self.process_ward_flow(patient)
-
+        # Probabilistic routing after ICU
+        r = np.random.random()
+        if r < 0.6:
+            self.log_event(patient, "icu_to_ward")
+            yield from self.process_ward_flow(patient)
+        elif r < 0.6 + 0.25:
+            self.transferred_out += 1
+            self.log_event(patient, "transfer_out", unit="ICU")
+            self.log_event(patient, "icu_to_transfer")
+            yield self.env.timeout(0)
+        else:
+            self.log_event(patient, "icu_to_discharge")
+            yield from self.complete_discharge(patient, source="icu")
 
 
 
     def process_ward_flow(self, patient: Patient):
         """
-        MedSurg/Ward processing: request/board if needed, then LOS and discharge.
+        Ward (MedSurg) processing: request/board if needed, LOS, and disposition:
+        → Discharge or Transfer-Out (probabilistically).
         """
         patient.current_unit = "Ward"
-
-        # 1. Log request
         self.log_event(patient, "ward_request")
 
-        # 2. Attempt admission (may involve boarding)
         bed = yield from self.try_transfer_or_board(patient, target_unit="Ward")
         if bed is None:
-            return  # Patient was transferred out due to lack of capacity
+            self.transferred_out += 1
+            self.log_event(patient, "transfer_out", unit="Ward")
+            return
 
-        # 3. Admission successful
         self.ward_admits += 1
         self.log_event(patient, "ward_admit")
 
-        # 4. Length of Stay (empirical)
         ward_los = self.sample_los("Ward", patient.severity)
         yield self.env.timeout(ward_los)
 
-        # 5. Release bed and discharge
         yield self.medsurg.free_bed(bed)
-        yield from self.complete_discharge(patient, source="ward")
+        self.log_event(patient, "ward_discharge")
+
+        # Probabilistic routing after Ward
+        r = np.random.random()
+        if r < 0.8:
+            self.log_event(patient, "ward_to_discharge")
+            yield from self.complete_discharge(patient, source="ward")
+        else:
+            self.transferred_out += 1
+            self.log_event(patient, "transfer_out", unit="Ward")
+            self.log_event(patient, "ward_to_transfer")
+            yield self.env.timeout(0)
 
 
 
@@ -726,17 +742,27 @@ class HospitalFlowModel:
     # -------------------------------
     # Log 
     # -------------------------------
-    def log_event(self, patient, event):
-        """Log an event with timestamp, event name, patient id, severity, and current unit."""
+    def log_event(self, patient, event, **kwargs):
+        """
+        Logs a structured event for a patient with optional extra fields.
+        """
         log = {
-            "time": round(self.env.now, 2),
-            "event": event,
+            "time": self.env.now,
             "pid": patient.pid,
+            "event": event,
             "severity": patient.severity,
-            "unit": patient.current_unit
+            "unit": getattr(patient, "current_unit", None)
         }
-        patient.event_log.append(log)
+        log.update(kwargs)  # <-- Accept extra keyword arguments
+
+        if hasattr(patient, "event_log"):
+            patient.event_log.append(log)
+
+        if self.debug:
+            print(log)
+
         self.event_log.append(log)
+
 
 
     def get_obs(self):
@@ -809,7 +835,13 @@ class HospitalFlowModel:
                     boarding_times.append(e["time"] - boarding_start)
 
             if arrival and treatment_start:
-                wait_times.append(treatment_start - arrival)
+                wait = treatment_start - arrival
+                if self.debug and wait == 0:
+                    print(f"[DEBUG] PID {p.pid} waited 0 mins (instant admit?)")
+                elif self.debug and wait > 0:
+                    print(f"[DEBUG] PID {p.pid} waited {wait:.1f} mins")
+                wait_times.append(wait)
+
 
         if durations:
             summary["avg_total_time"] = np.mean(durations)
@@ -1010,8 +1042,8 @@ if __name__ == "__main__":
     print("=== Hospital Simulation Debug Runner (7‑day test) ===")
 
     scenario = Scenario(
-        simulation_time    = 60 * 24 * 7,
-        n_ed_beds          = 15,
+        simulation_time    = 43_829,
+        n_ed_beds          = 3,
         n_icu_beds         = 4,
         n_medsurg_beds     = 10,
         day_shift_nurses   = 10,
