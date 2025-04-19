@@ -45,12 +45,14 @@ class NurseGroup:
 with open("DataAnalysis/empirical_params.json") as f:
     _js = json.load(f)
 LAMBDA_HOUR    = _js["lambda_hour"]        # 24‑vector of λ arrivals/hr
-SEVERITY_PROBS = _js["class_probs"]        # [p_G1‑2, p_G3, p_G4‑5]
-# Map severity 1→G1‑2, 2→G3, 3→G4‑5
+SEVERITY_PROBS = _js["acuity_probs"]        
+
 LOS_PARAMS     = {
-    1: tuple(_js["lognorm_params"]["G1-2"]),
-    2: tuple(_js["lognorm_params"]["G3"]),
-    3: tuple(_js["lognorm_params"]["G4-5"])
+    1: tuple(_js["lognorm_params"]["1"]),
+    2: tuple(_js["lognorm_params"]["2"]),
+    3: tuple(_js["lognorm_params"]["3"]),
+    4: tuple(_js["lognorm_params"]["4"]),
+    5: tuple(_js["lognorm_params"]["5"])
 }
 
 
@@ -103,27 +105,36 @@ class Scenario:
         # ────────────────────────────────────────────────
         df = pd.read_csv(acuity_los_csv)
         # Only keep ED (“Emergency”), ICU, Ward (“Medical Ward”)
-        unit_map = {"Emergency":"ED", "ICU":"ICU", "Medical Ward":"Ward"}
-        df = df[df["unit_group"].isin(unit_map)]
+        unit_map = {"Emergency": "ED", "ICU": "ICU", "Medical Ward": "Ward"}
+        self.los_params = {u: {} for u in unit_map.values()}
         
-        # Nested dict: self.los_params[unit][acuity] = (mu, sigma)
-        self.los_params = {"ED":{}, "ICU":{}, "Ward":{}}
         for _, row in df.iterrows():
-            unit      = unit_map[row["unit_group"]]
-            acuity    = int(row["acuity"])
-            mean_min  = row["mean_min"]
-            var_min   = row["var_min"]
-            # log-normal formulas so that mean = mean_min, var = var_min
-            sigma2 = np.log(1 + var_min / mean_min**2)
-            mu     = np.log(mean_min / np.sqrt(1 + var_min / mean_min**2))
-            sigma  = np.sqrt(sigma2)
+            raw_unit = row["unit_group"]
+            if raw_unit not in unit_map:
+                continue
+
+            unit = unit_map[raw_unit]
+            acuity = int(float(row["acuity"]))  # ensures 1.0 → 1, etc.
+            mean = row["mean_min"]
+            var  = row["var_min"]
+
+            if np.isnan(mean) or np.isnan(var) or var <= 0 or mean <= 0:
+                continue
+
+            sigma2 = np.log(1 + var / mean**2)
+            mu = np.log(mean / np.sqrt(1 + var / mean**2))
+            sigma = np.sqrt(sigma2)
+
             self.los_params[unit][acuity] = (mu, sigma)
 
-        # Ensure every acuity 1–3 exists for each unit (fallback)
-        default_mu, default_sigma = np.log(120), 1.0
-        for u in ("ED","ICU","Ward"):
-            for a in (1,2,3):
-                self.los_params[u].setdefault(a, (default_mu, default_sigma))
+        # After parsing LOS from CSV, ensure all 5 acuities exist for each unit
+        default_mu, default_sigma = np.log(120), 1.0  # default fallback
+
+        for unit in ["ED", "ICU", "Ward"]:
+            for acuity in range(1, 6):  # 1 to 5
+                if acuity not in self.los_params[unit]:
+                    self.los_params[unit][acuity] = (default_mu, default_sigma)
+
 
         # 4. Within-stay transition matrix (unchanged)
         if os.path.isfile(within_stay_csv):
@@ -328,7 +339,7 @@ class HospitalFlowModel:
 
 
     def get_severity_multiplier(self, severity):
-        return {1: 0.8, 2: 1.0, 3: 1.5}.get(severity, 1.0)
+        return {1: 0.6, 2: 0.8, 3: 1.0, 4: 1.3, 5: 1.6}.get(severity, 1.0)
 
     def try_transfer_or_board(self, patient, target_unit: str):
         """
@@ -360,16 +371,17 @@ class HospitalFlowModel:
         self.log_event(patient, f"start_boarding_{target_unit}")
         self.boarded_count += 1
 
-        wait_start = self.env.now
+        # ✅ Set this now so you can calculate wait time later
+        patient.boarding_start_time = self.env.now
+
         resource = self.icu if target_unit == "ICU" else self.medsurg
         bed = yield resource.occupy_bed()
-        wait_time = self.env.now - wait_start
+        wait_time = self.env.now - patient.boarding_start_time
 
-        boarding_time = self.env.now - patient.boarding_start_time
-        self.total_boarding_time += boarding_time
-
+        self.total_boarding_time += wait_time
         self.log_event(patient, f"end_boarding_{target_unit}")
         return bed
+
 
 
 
@@ -488,7 +500,7 @@ class HospitalFlowModel:
             yield self.env.timeout(iat)
 
             # 2) Sample acuity from empirical distribution
-            severity = np.random.choice([1, 2, 3], p=self.scenario.severity_probs)
+            severity = np.random.choice([1, 2, 3, 4, 5], p=self.scenario.severity_probs)
 
             # 3) Triage gate (low‐acuity reject)
             if severity == 1 and random.random() < getattr(self, "triage_threshold", 0.0):
@@ -506,8 +518,13 @@ class HospitalFlowModel:
             pat = Patient(pid=self.pid_counter,
                           arrival_time=self.env.now,
                           severity=severity)
+            pat.event_log.append({
+                'time': self.env.now,
+                'event': 'arrival' 
+            })
             self.pid_counter += 1
             self.patients.append(pat)
+
             self.env.process(self.process_ed_flow(pat))
             self.event_log.append({
                 'time':       self.env.now,
@@ -565,10 +582,12 @@ class HospitalFlowModel:
         self.log_event(patient, "ed_complete")
 
         # 5) Route onward
-        p_discharge, p_icu, _ = self._get_disposition_probs(patient.severity)
-        if np.random.random() < p_discharge:
+        p_discharge, p_icu, p_ward = self._get_disposition_probs(patient.severity)
+        r = np.random.random()
+
+        if r < p_discharge:
             yield from self.complete_discharge(patient, source="ed")
-        elif np.random.random() < (p_discharge + p_icu):
+        elif r < p_discharge + p_icu:
             yield from self.process_icu_flow(patient)
         else:
             yield from self.process_ward_flow(patient)
@@ -577,56 +596,62 @@ class HospitalFlowModel:
 
     def process_icu_flow(self, patient: Patient):
         """
-        ICU processing: request/board if needed, then LOS and step‐down to Ward.
+        ICU processing: request/board if needed, then LOS and step-down to Ward.
         """
         patient.current_unit = "ICU"
+
+        # 1. Log request for ICU
         self.log_event(patient, "icu_request")
 
-        # 1) Admit or board out
+        # 2. Attempt admission (may involve boarding)
         bed = yield from self.try_transfer_or_board(patient, target_unit="ICU")
         if bed is None:
-            return  # transferred out
+            return  # Patient was transferred out due to lack of capacity
 
-        # 2) Log admission
+        # 3. Admission successful
         self.icu_admits += 1
         self.log_event(patient, "icu_admit")
 
-        # 3) Sample ICU LOS
+        # 4. Length of Stay (empirical)
         icu_los = self.sample_los("ICU", patient.severity)
         yield self.env.timeout(icu_los)
 
-        # 4) Discharge from ICU
+        # 5. Release ICU bed
         yield self.icu.free_bed(bed)
         self.log_event(patient, "icu_discharge")
 
-        # 5) Step‐down to Ward
+        # 6. Step-down to Ward
         yield from self.process_ward_flow(patient)
+
 
 
 
     def process_ward_flow(self, patient: Patient):
         """
-        MedSurg/Ward processing: request/board, LOS, then discharge.
+        MedSurg/Ward processing: request/board if needed, then LOS and discharge.
         """
         patient.current_unit = "Ward"
+
+        # 1. Log request
         self.log_event(patient, "ward_request")
 
-        # 1) Admit or board out
+        # 2. Attempt admission (may involve boarding)
         bed = yield from self.try_transfer_or_board(patient, target_unit="Ward")
         if bed is None:
-            return  # transferred out
+            return  # Patient was transferred out due to lack of capacity
 
-        # 2) Log admission
+        # 3. Admission successful
         self.ward_admits += 1
         self.log_event(patient, "ward_admit")
 
-        # 3) Sample Ward LOS
+        # 4. Length of Stay (empirical)
         ward_los = self.sample_los("Ward", patient.severity)
         yield self.env.timeout(ward_los)
 
-        # 4) Discharge
+        # 5. Release bed and discharge
         yield self.medsurg.free_bed(bed)
         yield from self.complete_discharge(patient, source="ward")
+
 
 
 
@@ -687,21 +712,14 @@ class HospitalFlowModel:
 
 
     def _get_disposition_probs(self, severity):
-        """
-        Return (discharge_prob, icu_prob, ward_prob) for a given severity.
-        Must sum to ~1.0
-        Example logic:
-        severity=1 => mostly discharge, rarely ward or icu
-        severity=2 => moderate chance discharge, some ward, some icu
-        severity=3 => bigger chance ICU or ward, smaller discharge
-        """
-        if severity == 1:
-            # Low acuity
-            return (0.85, 0.00, 0.15)
-        elif severity == 2:
-            return (0.60, 0.15, 0.25)
-        else:  # severity=3
-            return (0.30, 0.50, 0.20)
+        return {
+            1: (0.95, 0.02, 0.03),  # 95% discharged
+            2: (0.6, 0.15, 0.25),   # some go to ward
+            3: (0.3, 0.4, 0.3),     # mixed outcomes
+            4: (0.1, 0.7, 0.2),     # mostly ICU
+            5: (0.05, 0.9, 0.05)    # ICU-critical
+        }.get(severity, (0.3, 0.4, 0.3))  # fallback
+
 
 
 
