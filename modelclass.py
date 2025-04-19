@@ -63,22 +63,27 @@ import numpy as np
 import pandas as pd
 from scipy.stats import norm  # for log‑normal quantile
 
+import os
+import pandas as pd
+import numpy as np
+from scipy.stats import norm
+
 class Scenario:
     def __init__(
         self,
         simulation_time: float       = 60*24*7,
-        shift_length: float          = 8*60,
-        n_ed_beds: int               = 15,
-        n_icu_beds: int              = 4,
-        n_medsurg_beds: int          = 10,
-        day_shift_nurses: int        = 10,
-        night_shift_nurses: int      = 5,
+        shift_length:    float       = 8*60,
+        n_ed_beds:       int         = 15,
+        n_icu_beds:      int         = 4,
+        n_medsurg_beds:  int         = 10,
+        day_shift_nurses:int         = 10,
+        night_shift_nurses:int       = 5,
         arrival_profile: list[float] = None,   # λ per hour
-        severity_probs: list[float]  = None,   # P(severity=1,2,3)
-        los_params: dict[int,tuple]  = None,   # log‑normal params by severity
+        severity_probs:  list[float] = None,   # P(severity=1,2,3)
+        acuity_los_csv:  str         = "DataAnalysis/graphss/acuity_duration_stats.csv",
         within_stay_csv: str         = "DataAnalysis/graph/P_within_stay.csv",
-        exit_probs_csv: str          = "DataAnalysis/graph/P_exit_by_group.csv",
-        los_cap_quantile: float      = 0.99
+        exit_probs_csv:  str         = "DataAnalysis/graph/P_exit_by_group.csv",
+        los_cap_quantile:float       = 0.99
     ):
         # 1. Core simulation parameters
         self.simulation_time    = simulation_time
@@ -93,50 +98,70 @@ class Scenario:
         self.arrival_profile = arrival_profile or [1.0] * 24
         self.severity_probs  = severity_probs  or [1/3, 1/3, 1/3]
 
-        # 3. Length of stay (log-normal μ,σ) by severity
-        self.los_params = los_params or {
-            1: (np.log(60),  1.0),
-            2: (np.log(120), 1.0),
-            3: (np.log(240), 1.0)
-        }
+        # ────────────────────────────────────────────────
+        # 3. Empirical LOS: load CSV & compute log‑normal
+        # ────────────────────────────────────────────────
+        df = pd.read_csv(acuity_los_csv)
+        # Only keep ED (“Emergency”), ICU, Ward (“Medical Ward”)
+        unit_map = {"Emergency":"ED", "ICU":"ICU", "Medical Ward":"Ward"}
+        df = df[df["unit_group"].isin(unit_map)]
+        
+        # Nested dict: self.los_params[unit][acuity] = (mu, sigma)
+        self.los_params = {"ED":{}, "ICU":{}, "Ward":{}}
+        for _, row in df.iterrows():
+            unit      = unit_map[row["unit_group"]]
+            acuity    = int(row["acuity"])
+            mean_min  = row["mean_min"]
+            var_min   = row["var_min"]
+            # log-normal formulas so that mean = mean_min, var = var_min
+            sigma2 = np.log(1 + var_min / mean_min**2)
+            mu     = np.log(mean_min / np.sqrt(1 + var_min / mean_min**2))
+            sigma  = np.sqrt(sigma2)
+            self.los_params[unit][acuity] = (mu, sigma)
 
-        # 4. Within-stay transition matrix
+        # Ensure every acuity 1–3 exists for each unit (fallback)
+        default_mu, default_sigma = np.log(120), 1.0
+        for u in ("ED","ICU","Ward"):
+            for a in (1,2,3):
+                self.los_params[u].setdefault(a, (default_mu, default_sigma))
+
+        # 4. Within-stay transition matrix (unchanged)
         if os.path.isfile(within_stay_csv):
             df_w = pd.read_csv(within_stay_csv, index_col=0)
             self.within_stay_probs = df_w.to_dict(orient="index")
         else:
-            # Default transition routing (used by DRL flow)
             self.within_stay_probs = {
                 "ED":       {"Discharge": 0.20, "ICU": 0.30, "Ward": 0.50},
                 "ICU":      {"Discharge": 0.60, "Ward": 0.40},
                 "Ward":     {"Discharge": 1.00},
-                "Discharge":{"Discharge": 1.00},  # absorbing state
+                "Discharge":{"Discharge": 1.00},
             }
 
-        # 5. Exit probabilities after "Discharge" (used for optional future transition logic)
+        # 5. Exit probabilities (unchanged)
         if os.path.isfile(exit_probs_csv):
             df_e = pd.read_csv(exit_probs_csv, index_col=0)
             if "P_exit" in df_e.columns:
                 self.exit_probs = df_e["P_exit"].to_dict()
             else:
-                self.exit_probs = {g: 1.0 / len(df_e) for g in df_e.index}
+                self.exit_probs = {g: 1/len(df_e) for g in df_e.index}
         else:
-            # Equal fallback if CSV missing or not yet in use
-            groups = list(self.within_stay_probs.keys())
-            fallback_prob = 1.0 / len(groups)
-            self.exit_probs = {g: fallback_prob for g in groups}
+            fallback = 1.0 / len(self.within_stay_probs)
+            self.exit_probs = {g: fallback for g in self.within_stay_probs}
 
-        # 6. LOS capping logic
-        #    a) ED LOS cap from exponential distribution
-        ed_mean_min = 60.0  # default; change if you want to pass a mean treatment time
-        ed_rate = 1.0 / ed_mean_min
+        # 6. LOS capping (unchanged)
+        ed_rate = 1.0 / 60.0
         self.ed_max = -np.log(1.0 - los_cap_quantile) / ed_rate
-
-        #    b) ICU/Ward LOS cap from log-normal quantiles
         z = norm.ppf(los_cap_quantile)
         self.los_max = {}
-        for sev, (mu, sigma) in self.los_params.items():
-            self.los_max[sev] = float(np.exp(mu + sigma * z))
+        # Now uses the new nested self.los_params for all units? 
+        # If you want to cap per unit, you can extend this loop accordingly.
+        for acuity, (mu, sigma) in self.los_params["ED"].items():
+            self.los_max[("ED", acuity)] = float(np.exp(mu + sigma*z))
+        for acuity, (mu, sigma) in self.los_params["ICU"].items():
+            self.los_max[("ICU", acuity)] = float(np.exp(mu + sigma*z))
+        for acuity, (mu, sigma) in self.los_params["Ward"].items():
+            self.los_max[("Ward", acuity)] = float(np.exp(mu + sigma*z))
+
 
 
 #############################
@@ -265,6 +290,7 @@ class HospitalFlowModel:
         self.lwbs_count = 0
         self.discharge_count = 0
         self.boarded_count = 0
+        self.total_boarding_time = 0.0
         self.transferred_out = 0
         self.pid_counter = 1
         self.patients = []
@@ -332,14 +358,16 @@ class HospitalFlowModel:
         If no bed is available, board the patient until available, or escalate.
         """
         self.log_event(patient, f"start_boarding_{target_unit}")
-        self.boarding_count += 1
+        self.boarded_count += 1
 
         wait_start = self.env.now
         resource = self.icu if target_unit == "ICU" else self.medsurg
         bed = yield resource.occupy_bed()
         wait_time = self.env.now - wait_start
 
-        self.total_boarding_time += wait_time
+        boarding_time = self.env.now - patient.boarding_start_time
+        self.total_boarding_time += boarding_time
+
         self.log_event(patient, f"end_boarding_{target_unit}")
         return bed
 
@@ -489,116 +517,116 @@ class HospitalFlowModel:
             })
 
 
+    # HELPER
+    def sample_los(self, unit: str, severity: int) -> float:
+        """
+        Draw a log‑normal LOS for the given 'unit' and patient 'severity',
+        then scale by severity multiplier, nurse fatigue, and discharge acceleration (if non-ED).
+        """
+        # 1) Get empirical (mu, sigma)
+        mu, sigma = self.scenario.los_params[unit][severity]
+        base_los = np.random.lognormal(mu, sigma)
+
+        # 2) Apply severity & nurse fatigue
+        los = base_los * self.get_severity_multiplier(severity) * self.nurse_fatigue
+
+        # 3) If not ED, also apply discharge acceleration factor
+        if unit != "ED":
+            accel_factor = max(0.5, 1.0 - 0.1 * self.discharge_acceleration)
+            los *= accel_factor
+
+        return los        
+
+
+    #FLOWS
     def process_ed_flow(self, patient: Patient):
         """
-        ED processing: request an ED bed, treat the patient, and then decide on next steps.
-        Uses severity-adjusted lognormal LOS and probabilistic routing.
+        ED → treatment → discharge/ICU/Ward routing.
         """
-        severity_factor = self.get_severity_multiplier(patient.severity)
-
-        # Request an ED bed with timeout (simulating LWBS if patient waits too long)
+        # 1) Attempt to get an ED bed (timeout ⇒ LWBS)
         req = self.ed.request()
-        result = yield req | self.env.timeout(120)  # 2-hour wait threshold
+        result = yield req | self.env.timeout(120)
         if req not in result:
             self.lwbs_count += 1
             self.log_event(patient, "lwbs")
             return
 
-        self.log_event(patient, "ed_admit")
+        # 2) Admit & log start of treatment
+        self.log_event(patient, "start_treatment")
         patient.start_treatment = self.env.now
 
-        # 🔁 Use severity-driven log-normal LOS instead of ed_treatment_mean
-        mu, sigma = self.scenario.los_params[patient.severity]
-        t_ed = np.random.lognormal(mu, sigma)
+        # 3) Sample ED LOS (empirical)
+        ed_los = self.sample_los("ED", patient.severity)
+        yield self.env.timeout(ed_los)
 
-        # Adjust for nurse fatigue and severity
-        t_ed *= severity_factor
-        t_ed *= self.nurse_fatigue
-
-        yield self.env.timeout(t_ed)
+        # 4) Complete treatment
         patient.end_treatment = self.env.now
         self.ed.release(req)
         self.log_event(patient, "ed_complete")
 
-        # Probabilistic routing: Discharge vs ICU vs Ward
-        p_discharge, p_icu, p_ward = self._get_disposition_probs(patient.severity)
-        r = np.random.random()
-
-        if r < p_discharge:
+        # 5) Route onward
+        p_discharge, p_icu, _ = self._get_disposition_probs(patient.severity)
+        if np.random.random() < p_discharge:
             yield from self.complete_discharge(patient, source="ed")
-        elif r < p_discharge + p_icu:
+        elif np.random.random() < (p_discharge + p_icu):
             yield from self.process_icu_flow(patient)
         else:
             yield from self.process_ward_flow(patient)
 
 
+
     def process_icu_flow(self, patient: Patient):
+        """
+        ICU processing: request/board if needed, then LOS and step‐down to Ward.
+        """
         patient.current_unit = "ICU"
         self.log_event(patient, "icu_request")
 
-
+        # 1) Admit or board out
         bed = yield from self.try_transfer_or_board(patient, target_unit="ICU")
         if bed is None:
-            return  # patient was transferred out
+            return  # transferred out
 
-
+        # 2) Log admission
         self.icu_admits += 1
         self.log_event(patient, "icu_admit")
 
-        # Draw LOS from empirical log‑normal
-        mu, sigma = self.scenario.los_params[patient.severity]
-        icu_los    = np.random.lognormal(mean=mu, sigma=sigma)
-
-        # Apply severity multiplier & nurse fatigue
-        icu_los *= self.get_severity_multiplier(patient.severity)
-        icu_los *= self.nurse_fatigue
-
-        # Discharge acceleration: 10% per step, floor at 50%
-        factor = max(0.5, 1.0 - 0.1 * self.discharge_acceleration)
-        icu_los *= factor
-
+        # 3) Sample ICU LOS
+        icu_los = self.sample_los("ICU", patient.severity)
         yield self.env.timeout(icu_los)
 
+        # 4) Discharge from ICU
         yield self.icu.free_bed(bed)
         self.log_event(patient, "icu_discharge")
 
-        # Step down to ward
+        # 5) Step‐down to Ward
         yield from self.process_ward_flow(patient)
 
 
-        
 
     def process_ward_flow(self, patient: Patient):
+        """
+        MedSurg/Ward processing: request/board, LOS, then discharge.
+        """
         patient.current_unit = "Ward"
         self.log_event(patient, "ward_request")
 
+        # 1) Admit or board out
         bed = yield from self.try_transfer_or_board(patient, target_unit="Ward")
         if bed is None:
-            return  # patient was transferred out
+            return  # transferred out
 
-
-
+        # 2) Log admission
         self.ward_admits += 1
         self.log_event(patient, "ward_admit")
 
-        # Draw LOS from empirical log‑normal
-        mu, sigma = self.scenario.los_params[patient.severity]
-        ward_los   = np.random.lognormal(mean=mu, sigma=sigma)
-
-        # Apply severity multiplier & nurse fatigue
-        ward_los *= self.get_severity_multiplier(patient.severity)
-        ward_los *= self.nurse_fatigue
-
-        # Discharge acceleration factor
-        factor = max(0.5, 1.0 - 0.1 * self.discharge_acceleration)
-        ward_los *= factor
-
+        # 3) Sample Ward LOS
+        ward_los = self.sample_los("Ward", patient.severity)
         yield self.env.timeout(ward_los)
 
+        # 4) Discharge
         yield self.medsurg.free_bed(bed)
         yield from self.complete_discharge(patient, source="ward")
-
-
 
 
 
@@ -972,7 +1000,6 @@ if __name__ == "__main__":
         night_shift_nurses = 5,
         arrival_profile    = LAMBDA_HOUR,
         severity_probs     = SEVERITY_PROBS,
-        los_params         = LOS_PARAMS
     )
 
     model = HospitalFlowModel(scenario, start_datetime=datetime.datetime.now(), debug=True)
