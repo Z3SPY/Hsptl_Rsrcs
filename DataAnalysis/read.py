@@ -121,37 +121,44 @@ anchor_group_check = [ "2008 - 2010", "2011 - 2013", "2014 - 2016", "2017 - 2019
 
 
         
-def plot_admission_histogram(df_group, group):
-    """
-    Creates a histogram visualization of patient admissions over a 3-year period
-    showing weekly trends and monthly distributions.
-    """
-    # Convert admittime to datetime if not already
+def plot_admission_histogram(df_group, group, normalize=False):
     df_group['admittime'] = pd.to_datetime(df_group['admittime'])
-    
-    # Create weekly bins
     df_group['week'] = df_group['admittime'].dt.isocalendar().week
     df_group['month'] = df_group['admittime'].dt.month
     df_group['year'] = df_group['admittime'].dt.year
-    
-    # Create figure with secondary y-axis
+
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10))
-    
-    # Weekly histogram
+
+    # Weekly distribution
     weekly_counts = df_group.groupby(['year', 'week']).size().reset_index(name='counts')
-    ax1.hist(weekly_counts['counts'], bins=30, color='skyblue', edgecolor='black')
-    ax1.set_title(f'Weekly Admission Distribution ({group})')
-    ax1.set_xlabel('Number of Admissions per Week')
-    ax1.set_ylabel('Frequency')
-    
-    # Monthly box plot
+    admission_distribution = weekly_counts['counts'].value_counts().sort_index()
+
+    # Discrete histogram
+    if normalize:
+        ax1.bar(admission_distribution.index,
+                admission_distribution.values / admission_distribution.sum(),
+                color='skyblue', edgecolor='black')
+        ax1.set_ylabel("Proportion of Weeks")
+    else:
+        ax1.bar(admission_distribution.index,
+                admission_distribution.values,
+                color='skyblue', edgecolor='black')
+        ax1.set_ylabel("Number of Weeks with That Admission Count")
+
+    ax1.set_title(f'Weekly Admission Count Distribution ({group})')
+    ax1.set_xlabel('Number of Admissions in a Week')
+
+    # Monthly boxplot
     monthly_counts = df_group.groupby(['year', 'month']).size().reset_index(name='counts')
     monthly_data = [monthly_counts[monthly_counts['month'] == m]['counts'].values for m in range(1, 13)]
-    ax2.boxplot(monthly_data, labels=['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 
-                                    'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'])
-    
+    ax2.boxplot(monthly_data, labels=['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+                                      'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'])
+    ax2.set_title(f'Monthly Admission Variation ({group})')
+    ax2.set_ylabel('Admissions per Month')
+
     plt.tight_layout()
     plt.show()
+
 
 # Update the main code section to include the new visualization
 if (run is True):

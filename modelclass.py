@@ -270,13 +270,12 @@ class HospitalFlowModel:
         # PATIENTS AND EVENTS
         self.event_log = []
         self.patients = []
+        self.completed_patients = []
         self.pid_counter = 0
         self.utilisation_log = []
 
         self.hourly_arrivals = [0] * 24              # index = hour of day
         self.daily_arrivals  = defaultdict(int)      # key = day index (0,1,2,…)
-        self.arrival_scale = .5
-        #self.scaled_lambda = [l * self.arrival_scale for l in scenario.arrival_profile]
         self.raw_arrivals = 0
 
         # REMOVE IF POSSIBOLE?    
@@ -583,22 +582,40 @@ class HospitalFlowModel:
     # HELPER
     def sample_los(self, unit: str, severity: int) -> float:
         """
-        Draw a log‑normal LOS for the given 'unit' and patient 'severity',
-        then scale by severity multiplier, nurse fatigue, and discharge acceleration (if non-ED).
+        Draw a log‑normal LOS for the given unit and severity.
+        Scales by severity multiplier, nurse fatigue, and discharge acceleration (if non-ED).
+        Applies bounds and debug logging.
         """
-        # 1) Get empirical (mu, sigma)
-        mu, sigma = self.scenario.los_params[unit][severity]
+        try:
+            mu, sigma = self.scenario.los_params[unit][severity]
+        except (KeyError, IndexError):
+            print(f"[WARN] Invalid severity={severity} for unit={unit} — using fallback LOS.")
+            mu, sigma = 2.0, 0.5
+
         base_los = np.random.lognormal(mu, sigma)
 
-        # 2) Apply severity & nurse fatigue
-        los = base_los * self.get_severity_multiplier(severity) * self.nurse_fatigue
+        severity_mult = self.get_severity_multiplier(severity)
+        los = base_los * severity_mult * self.nurse_fatigue
 
-        # 3) If not ED, also apply discharge acceleration factor
         if unit != "ED":
             accel_factor = max(0.5, 1.0 - 0.1 * self.discharge_acceleration)
             los *= accel_factor
+        else:
+            accel_factor = 1.0
 
-        return los        
+        # Optional: floor LOS by unit type
+        min_los_by_unit = {"Ward": 60, "ICU": 120, "Psych": 180, "ED": 30} # Change this
+        los = max(los, min_los_by_unit.get(unit, 30))
+
+        if self.debug:
+            print(
+                f"[LOS] Unit={unit}, Sev={severity}, base={base_los:.1f}, "
+                f"× severity={severity_mult:.2f}, × fatigue={self.nurse_fatigue:.2f}, "
+                f"× accel={accel_factor:.2f} → LOS={los:.1f} min"
+            )
+
+        return los
+        
 
 
     #FLOWS
@@ -762,17 +779,24 @@ class HospitalFlowModel:
     # Discharge 
     # ------------------------------- 
                                        
-    def complete_discharge(self, patient: Patient, source="discharge"):
+    def complete_discharge(self, patient: Patient, source="ward"):
         """
-        Mark the patient as discharged, update counters, and log the event.
+        Mark the patient as discharged, update logs and counters.
         """
         patient.status = "discharged"
         patient.current_unit = "Exit"
         patient.discharge_time = self.env.now
         self.discharge_count += 1
-        self.log_event(patient, f"{source}_discharge")
-        # Yield a 0-time event so it becomes a generator
+
+        # Log clean discharge event (with unit specified)
+        self.log_event(patient, event="discharge", unit=source)
+
+        # Add to completed list if you want to track this
+        self.completed_patients.append(patient)
+
+        # Yield a 0-time event so it can be used as a generator
         yield self.env.timeout(0)
+
 
 
 
