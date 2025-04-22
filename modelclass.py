@@ -24,6 +24,7 @@ from gymnasium import spaces
 import json
 import pandas as pd
 import os
+from collections import defaultdict
 
 
 class NurseGroup:
@@ -80,8 +81,8 @@ class Scenario:
         n_medsurg_beds:  int         = 10,
         day_shift_nurses:int         = 10,
         night_shift_nurses:int       = 5,
-        arrival_profile: list[float] = None,   # λ per hour
-        severity_probs:  list[float] = None,   # P(severity=1,2,3)
+        arrival_profile: list[float] = LAMBDA_HOUR,   # λ per hour
+        severity_probs:  list[float] = SEVERITY_PROBS,   # P(severity=1,2,3)
         acuity_los_csv:  str         = "DataAnalysis/graphss/acuity_duration_stats.csv",
         within_stay_csv: str         = "DataAnalysis/graph/P_within_stay.csv",
         exit_probs_csv:  str         = "DataAnalysis/graph/P_exit_by_group.csv",
@@ -266,10 +267,17 @@ class HospitalFlowModel:
         self.start_datetime = start_datetime if start_datetime else datetime.datetime.now()
         self.env = simpy.Environment()
 
+        # PATIENTS AND EVENTS
         self.event_log = []
         self.patients = []
         self.pid_counter = 0
         self.utilisation_log = []
+
+        self.hourly_arrivals = [0] * 24              # index = hour of day
+        self.daily_arrivals  = defaultdict(int)      # key = day index (0,1,2,…)
+        self.arrival_scale = .5
+        #self.scaled_lambda = [l * self.arrival_scale for l in scenario.arrival_profile]
+        self.raw_arrivals = 0
 
         # REMOVE IF POSSIBOLE?    
         self.trans_probs = scenario.within_stay_probs
@@ -317,6 +325,10 @@ class HospitalFlowModel:
         # ---- NOW seed the first utilisation record -----------
         initial_audit = self.utilisation_audit(current_time=0.0)
         self.utilisation_log.append(initial_audit)
+
+        # Testing
+        self.env.process(self.arrivals_generator())
+        self.env.process(self.audit_util(interval=60))
 
 
     @property
@@ -385,12 +397,29 @@ class HospitalFlowModel:
 
         resource = self.icu if target_unit == "ICU" else self.medsurg
         bed = yield resource.occupy_bed()
+        patient.boarding_end_time = self.env.now
 
         wait_time = self.env.now - patient.boarding_start_time
         self.total_boarding_time += wait_time
 
         self.log_event(patient, f"end_boarding_{target_unit}")
         return bed
+    
+    def handle_icu_boarding(self, patient, icu_request):
+        boarding_start = self.env.now
+        result = yield icu_request | self.env.timeout(360)  # max 6hr wait
+        waited = self.env.now - boarding_start
+        patient.icu_wait_time = waited
+
+        if icu_request not in result:
+            self.transferred_out += 1
+            self.log_event(patient, "transfer_due_to_boarding")
+            return
+
+        self.log_event(patient, "icu_admit")
+        yield self.env.timeout(np.random.exponential(180))  # example LOS
+        self.log_event(patient, "icu_discharge")
+
 
 
 
@@ -495,40 +524,59 @@ class HospitalFlowModel:
     # 4B. Arrivals Generator
     # -------------------------------
     def arrivals_generator(self):
+        """
+        Continuous, non‑homogeneous Poisson arrival stream.
+        Samples number of arrivals each hour, schedules each within hour.
+        """
         pid_counter = itertools.count(1)
-        for _ in pid_counter:
-            if self.env.now >= self.scenario.simulation_time:
-                break
-
-            # 1) Sample inter‑arrival from empirical λ-hour
+        while self.env.now < self.scenario.simulation_time:
             hr = int((self.env.now // 60) % 24)
             lam = self.scenario.arrival_profile[hr]
             eff_lam = lam * (1.0 - getattr(self, "ambulance_diversion_rate", 0.0))
-            iat = np.random.exponential(60.0 / max(eff_lam, 1e-6))
+
+            n_arrivals = np.random.poisson(eff_lam)
+
             if self.debug:
-                print(f"[ARRIVAL] hour={hr}, λ={lam:.2f}, eff={eff_lam:.2f}, iat={iat:.1f}")
+                print(f"[ARRIVAL] t={self.env.now:.1f} min, hr={hr}, λ={lam:.2f}, eff={eff_lam:.2f}, count={n_arrivals}")
 
-            yield self.env.timeout(iat)
+            for _ in range(n_arrivals):
+                delay = np.random.uniform(0, 60 / max(n_arrivals, 1))
+                yield self.env.timeout(delay)
 
-            # 2) Sample severity from profile
-            severity = np.random.choice([1, 2, 3, 4, 5], p=self.scenario.severity_probs)
+                severity = np.random.choice([1, 2, 3, 4, 5], p=self.scenario.severity_probs)
 
-            # 3) Triage gate (low‐acuity rejection)
-            if severity == 1 and random.random() < getattr(self, "triage_threshold", 0.0):
-                self.lwbs_count += 1
-                # Triage reject event
-                dummy = Patient(pid=self.pid_counter, arrival_time=self.env.now, severity=severity)
-                self.log_event(dummy, "triage_reject")
+                if severity == 1 and random.random() < getattr(self, "triage_threshold", 0.0):
+                    self.lwbs_count += 1
+                    dummy = Patient(pid=self.pid_counter, arrival_time=self.env.now, severity=severity)
+                    self.log_event(dummy, "triage_reject")
+                    self.pid_counter += 1
+                    continue
+
+                # Optional triage delay (if triage bay exists)
+                if hasattr(self, "triage_bay"):
+                    with self.triage_bay.request() as tri_req:
+                        yield tri_req
+                        yield self.env.timeout(np.random.exponential(self.triage_mean))
+                        self.log_event(dummy, "triage_complete")
+
+                # Create and admit patient
+                pat = Patient(pid=self.pid_counter, arrival_time=self.env.now, severity=severity)
+                self.patients.append(pat)
+                self.log_event(pat, "arrival")
+                self.raw_arrivals += 1
+                self.hourly_arrivals[hr] += 1
+
+                day = int(self.env.now // (60 * 24))
+                self.daily_arrivals[day] += 1
+
+                self.env.process(self.process_ed_flow(pat))
                 self.pid_counter += 1
-                continue
 
-            # 4) Create and register new patient
-            pat = Patient(pid=self.pid_counter, arrival_time=self.env.now, severity=severity)
-            self.patients.append(pat)
-            self.log_event(pat, "arrival")  # ✅ Log with structure
+            # Advance to next hour
+            yield self.env.timeout(60 - (self.env.now % 60))
 
-            self.pid_counter += 1
-            self.env.process(self.process_ed_flow(pat))
+
+
 
 
 
@@ -558,29 +606,30 @@ class HospitalFlowModel:
         """
         ED → treatment → discharge/ICU/Ward routing.
         """
-        # 1) Attempt to get an ED bed (timeout ⇒ LWBS)
+        arrival_time = self.env.now
         req = self.ed.request()
         result = yield req | self.env.timeout(120)  # max wait before LWBS
 
+        waited = self.env.now - arrival_time
+        patient.wait_time = waited
+
         if req not in result:
             self.lwbs_count += 1
+            self.patients.append(patient)  # Track LWBS too
             self.log_event(patient, "lwbs")
             return
 
-        # 2) Patient admitted to ED → treatment starts now
         self.log_event(patient, "start_treatment")
         patient.start_treatment = self.env.now
 
-        # 3) Empirical length of stay in ED
         ed_los = self.sample_los("ED", patient.severity)
         yield self.env.timeout(ed_los)
 
-        # 4) Complete ED stay
         patient.end_treatment = self.env.now
         self.ed.release(req)
+        self.patients.append(patient)
         self.log_event(patient, "ed_complete")
 
-        # 5) Route to next unit
         p_discharge, p_icu, p_ward = self._get_disposition_probs(patient.severity)
         r = np.random.random()
 
@@ -602,7 +651,7 @@ class HospitalFlowModel:
         patient.current_unit = "ICU"
         self.log_event(patient, "icu_request")
 
-        # Attempt ICU admission or boarding
+        icu_req_time = self.env.now
         bed = yield from self.try_transfer_or_board(patient, target_unit="ICU")
         if bed is None:
             self.transferred_out += 1
@@ -610,6 +659,8 @@ class HospitalFlowModel:
             return
 
         self.icu_admits += 1
+        icu_wait = self.env.now - icu_req_time
+        patient.icu_wait_time = icu_wait
         self.log_event(patient, "icu_admit")
 
         icu_los = self.sample_los("ICU", patient.severity)
@@ -618,7 +669,6 @@ class HospitalFlowModel:
         yield self.icu.free_bed(bed)
         self.log_event(patient, "icu_discharge")
 
-        # Probabilistic routing after ICU
         r = np.random.random()
         if r < 0.6:
             self.log_event(patient, "icu_to_ward")
@@ -642,13 +692,15 @@ class HospitalFlowModel:
         patient.current_unit = "Ward"
         self.log_event(patient, "ward_request")
 
+        ward_req_time = self.env.now
         bed = yield from self.try_transfer_or_board(patient, target_unit="Ward")
         if bed is None:
             self.transferred_out += 1
             self.log_event(patient, "transfer_out", unit="Ward")
             return
 
-        self.ward_admits += 1
+        ward_wait = self.env.now - ward_req_time
+        patient.ward_wait_time = ward_wait
         self.log_event(patient, "ward_admit")
 
         ward_los = self.sample_los("Ward", patient.severity)
@@ -657,7 +709,6 @@ class HospitalFlowModel:
         yield self.medsurg.free_bed(bed)
         self.log_event(patient, "ward_discharge")
 
-        # Probabilistic routing after Ward
         r = np.random.random()
         if r < 0.8:
             self.log_event(patient, "ward_to_discharge")
@@ -806,6 +857,12 @@ class HospitalFlowModel:
 
     
     def get_patient_flow_summary(self):
+        """
+        Summarize patient flow metrics:
+          - Counts: total, discharged, boarded, LWBS, transferred
+          - Average and percentile wait times in each unit (ED, ICU, Ward)
+          - Average boarding time and total length of stay
+        """
         summary = {
             "n_total": len(self.patients),
             "n_discharged": self.discharge_count,
@@ -814,43 +871,71 @@ class HospitalFlowModel:
             "n_lwbs": self.lwbs_count,
             "avg_total_time": 0.0,
             "avg_boarding_time": 0.0,
-            "avg_wait_time": 0.0
+            # unit-specific waits
+            "avg_ed_wait": 0.0,
+            "avg_icu_wait": 0.0,
+            "avg_ward_wait": 0.0,
+            # overall
+            "avg_wait_overall": 0.0,
+            "median_ed_wait": 0.0,
+            "p95_ed_wait": 0.0,
         }
 
-        durations, boarding_times, wait_times = [], [], []
+        durations = []
+        boarding_times = []
+        ed_waits = []
+        icu_waits = []
+        ward_waits = []
 
         for p in self.patients:
-            if hasattr(p, "discharge_time") and p.discharge_time and p.arrival_time:
+            # total time in system
+            if getattr(p, 'discharge_time', None) and p.arrival_time is not None:
                 durations.append(p.discharge_time - p.arrival_time)
 
-            arrival, treatment_start, boarding_start = None, None, None
-            for e in p.event_log:
-                if e["event"] == "arrival":
-                    arrival = e["time"]
-                elif e["event"] == "start_treatment":
-                    treatment_start = e["time"]
-                elif e["event"] == "boarding":
-                    boarding_start = e["time"]
-                elif e["event"] == "transfer" and boarding_start is not None:
-                    boarding_times.append(e["time"] - boarding_start)
+            # boarding durations
+            if hasattr(p, 'boarding_start_time') and hasattr(p, 'boarding_end_time'):
+                boarding_times.append(p.boarding_end_time - p.boarding_start_time)
 
-            if arrival and treatment_start:
-                wait = treatment_start - arrival
-                if self.debug and wait == 0:
-                    print(f"[DEBUG] PID {p.pid} waited 0 mins (instant admit?)")
-                elif self.debug and wait > 0:
-                    print(f"[DEBUG] PID {p.pid} waited {wait:.1f} mins")
-                wait_times.append(wait)
+            # ED wait
+            if hasattr(p, 'wait_time'):
+                ed_waits.append(p.wait_time)
+
+            if hasattr(p, 'ward_wait_time'):
+                ward_waits.append(p.ward_wait_time)
+            
+            if hasattr(p, 'icu_wait_time'):
+                icu_waits.append(p.icu_wait_time)
 
 
+
+        # aggregate
         if durations:
-            summary["avg_total_time"] = np.mean(durations)
+            summary["avg_total_time"] = float(np.mean(durations))
         if boarding_times:
-            summary["avg_boarding_time"] = np.mean(boarding_times)
-        if wait_times:
-            summary["avg_wait_time"] = np.mean(wait_times)
+            summary["avg_boarding_time"] = float(np.mean(boarding_times))
+        if ed_waits:
+            summary["avg_ed_wait"] = float(np.mean(ed_waits))
+            summary["median_ed_wait"] = float(np.median(ed_waits))
+            summary["p95_ed_wait"] = float(np.percentile(ed_waits, 95))
+        if icu_waits:
+            summary["avg_icu_wait"] = float(np.mean(icu_waits))
+        if ward_waits:
+            summary["avg_ward_wait"] = float(np.mean(ward_waits))
 
-        return summary
+        # overall wait across all queues
+        all_waits = ed_waits + icu_waits + ward_waits
+        if all_waits:
+            summary["avg_wait_overall"] = float(np.mean(all_waits))
+
+        # print arrival counts
+        print("=== Arrival Counts ===")
+        print(f"  raw_arrivals   : {self.raw_arrivals}")
+        print(f"  admitted (n_total) : {len(self.patients)}")
+        print(f"  discharged     : {self.discharge_count}")
+        print(f"  left w/o svc   : {self.lwbs_count}")
+        print(f"  transferred    : {self.transferred_out}")
+
+        return summary 
 
 
 
@@ -922,11 +1007,8 @@ class HospitalFlowModel:
     # 4D. Run Function
     # -------------------------------
     def run(self, until):
-        if not self.background_started:
-            self.env.process(self.arrivals_generator())
-            self.env.process(self.audit_util(interval=60))
-            self.background_started = True
-        self.env.run(until=until)
+        horizon = until if until is not None else self.scenario.simulation_time
+        self.env.run(until=horizon)
 
 #############################
 # 5. HospitalActionSpace Class
@@ -1039,12 +1121,12 @@ if __name__ == "__main__":
     from pprint import pprint
     import datetime, time
 
-    print("=== Hospital Simulation Debug Runner (7‑day test) ===")
+    print("=== Hospital Simulation Debug Runner (30‑day test) ===")
 
     scenario = Scenario(
-        simulation_time    = 43_829,
-        n_ed_beds          = 3,
-        n_icu_beds         = 4,
+        simulation_time    = 30 * 24 * 60,
+        n_ed_beds          = 5,
+        n_icu_beds         = 5,
         n_medsurg_beds     = 10,
         day_shift_nurses   = 10,
         night_shift_nurses = 5,
@@ -1068,6 +1150,7 @@ if __name__ == "__main__":
 
         # d) Advance one shift
         model.run(until = model.env.now + shift_len)
+        
 
     # 4) Snapshot results
     snap = model.snapshot_state()
