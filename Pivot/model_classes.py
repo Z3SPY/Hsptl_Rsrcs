@@ -219,12 +219,6 @@ class CustomResource(simpy.Resource):
 # ## Model parameterisation
 
 class Scenario:
-    '''
-    Container class for scenario parameters/arguments
-
-    Passed to a model and its process classes
-    '''
-
     def __init__(self,
                  random_number_set=1,
                  n_triage=DEFAULT_N_TRIAGE,
@@ -509,10 +503,13 @@ class TraumaPathway:
 
         ###################################################
         # request sign-in/triage
+        waiting_time = self.env.now - self.arrival
+        self.total_waiting_time += max(0, waiting_time)
+
         triage_resource = yield self.args.triage.get()
 
         # record the waiting time for triage
-        self.wait_triage = self.env.now - self.arrival
+        self.wait_triage = waiting_time
 
         trace(f'patient {self.identifier} triaged to trauma '
                 f'{self.env.now:.3f}')
@@ -557,6 +554,9 @@ class TraumaPathway:
 
         ###################################################
         # request trauma room
+        waiting_time = self.env.now - start_wait
+        self.total_waiting_time += max(0, waiting_time)
+        
         trauma_resource = yield self.args.trauma.get()
 
         self.full_event_log.append(
@@ -570,7 +570,7 @@ class TraumaPathway:
         )
 
         # record the waiting time for trauma
-        self.wait_trauma = self.env.now - start_wait
+        self.wait_trauma =  waiting_time
 
         # sample stablisation duration.
         self.trauma_duration = self.args.trauma_dist.sample()
@@ -604,10 +604,13 @@ class TraumaPathway:
 
         ########################################################
         # request treatment cubicle
+        waiting_time = self.env.now - start_wait
+        self.total_waiting_time += max(0, waiting_time)
+
         trauma_treatment_resource = yield self.args.cubicle_2.get()
 
         # record the waiting time for trauma
-        self.wait_treat = self.env.now - start_wait
+        self.wait_treat = waiting_time
         trace(f'treatment of patient {self.identifier} at '
                 f'{self.env.now:.3f}')
         self.full_event_log.append(
@@ -634,6 +637,8 @@ class TraumaPathway:
              'time': self.env.now,
              'resource_id': trauma_treatment_resource.id_attribute}
         )
+
+        self.total_patients_served += 1
         self.full_event_log.append(
             {'patient': self.identifier,
             'pathway': 'Shared',
@@ -720,10 +725,13 @@ class NonTraumaPathway(object):
 
         ###################################################
         # request sign-in/triage
+        waiting_time = self.env.now - self.arrival
+        self.total_waiting_time += max(0, waiting_time)
+
         triage_resource = yield self.args.triage.get()
 
         # record the waiting time for triage
-        self.wait_triage = self.env.now - self.arrival
+        self.wait_triage = waiting_time
         trace(f'patient {self.identifier} triaged to minors '
                 f'{self.env.now:.3f}')
         self.full_event_log.append(
@@ -767,10 +775,13 @@ class NonTraumaPathway(object):
 
         #########################################################
         # request registration clerk
+        waiting_time = self.env.now - start_wait
+        self.total_waiting_time += max(0, waiting_time)
+
         registration_resource = yield self.args.registration.get()
             
         # record the waiting time for registration
-        self.wait_reg = self.env.now - start_wait
+        self.wait_reg = waiting_time
         trace(f'registration of patient {self.identifier} at '
                 f'{self.env.now:.3f}')
         self.full_event_log.append(
@@ -815,10 +826,13 @@ class NonTraumaPathway(object):
 
         #########################################################
         # request examination resource
+        waiting_time = self.env.now - start_wait
+        self.total_waiting_time += max(0, waiting_time)
+
         examination_resource = yield self.args.exam.get()
 
         # record the waiting time for examination to begin
-        self.wait_exam = self.env.now - start_wait
+        self.wait_exam = waiting_time
         trace(f'examination of patient {self.identifier} begins '
                 f'{self.env.now:.3f}')
         self.full_event_log.append(
@@ -874,11 +888,13 @@ class NonTraumaPathway(object):
             )
             ###################################################
             # request treatment cubicle
+            waiting_time = self.env.now - start_wait
+            self.total_waiting_time += max(0, waiting_time)
 
             non_trauma_treatment_resource = yield self.args.cubicle_1.get()
 
             # record the waiting time for treatment
-            self.wait_treat = self.env.now - start_wait
+            self.wait_treat = waiting_time
             trace(f'treatment of patient {self.identifier} begins '
                     f'{self.env.now:.3f}')
             self.full_event_log.append(
@@ -912,6 +928,7 @@ class NonTraumaPathway(object):
         ##########################################################################
 
         # Return to what happens to all patients, regardless of whether they were sampled as needing treatment
+        self.total_patients_served += 1
         self.full_event_log.append(
             {'patient': self.identifier,
             'pathway': 'Shared',
@@ -953,6 +970,11 @@ class TreatmentCentreModel:
 
         self.full_event_log = []
         self.utilisation_audit = []
+
+        # ADDED 
+        self.total_patients_served = 0
+        self.total_waiting_time = 0.0  # in minutes
+
 
     def init_resources(self):
         '''
@@ -1203,6 +1225,7 @@ class TreatmentCentreModel:
             yield self.env.timeout(interarrival_time)
 
             trace(f'patient {patient_count} arrives at: {self.env.now:.3f}')
+
             self.full_event_log.append(
                 {'patient': patient_count,
                  'pathway': 'Shared',
@@ -2022,10 +2045,14 @@ class SimplePathway(object):
         )
 
         # Seize a treatment resource when available
+        
+        waiting_time = self.env.now - start_wait
+        self.total_waiting_time += max(0, waiting_time)
+
         treatment_resource = yield self.args.treatment.get()
             
         # record the waiting time for registration
-        self.wait_treat = self.env.now - start_wait
+        self.wait_treat = waiting_time
         trace(f'treatment of patient {self.identifier} begins '
                 f'{self.env.now:.3f}')
         self.full_event_log.append(
@@ -2058,6 +2085,8 @@ class SimplePathway(object):
         self.args.treatment.put(treatment_resource) 
 
         # total time in system
+        self.total_patients_served += 1 # Discharged
+
         self.total_time = self.env.now - self.arrival
         self.full_event_log.append(
             {'patient': self.identifier,
@@ -2290,10 +2319,13 @@ class SimpleBranchedPathway(object):
 
         #########################################################
         # All arrivals require examination
+        waiting_time = self.env.now - start_wait
+        self.total_waiting_time += max(0, waiting_time)
+
         examination_resource = yield self.args.exam.get()
 
         # record the waiting time for registration
-        self.wait_exam = self.env.now - start_wait
+        self.wait_exam = waiting_time
         trace(f'treatment of patient {self.identifier} begins '
                 f'{self.env.now:.3f}')
         self.full_event_log.append(
@@ -2350,11 +2382,13 @@ class SimpleBranchedPathway(object):
             )
             ###################################################
             # request treatment cubicle
+            waiting_time = self.env.now - start_wait
+            self.total_waiting_time += max(0, waiting_time)
 
             non_trauma_treatment_resource = yield self.args.treatment.get()
 
             # record the waiting time for treatment
-            self.wait_treat = self.env.now - start_wait
+            self.wait_treat = waiting_time
             trace(f'treatment of patient {self.identifier} begins '
                     f'{self.env.now:.3f}')
             self.full_event_log.append(
@@ -2386,6 +2420,8 @@ class SimpleBranchedPathway(object):
             # Resource is no longer in use, so put it back in the store
             self.args.treatment.put(non_trauma_treatment_resource)
 
+            
+            self.total_patients_served += 1
             self.full_event_log.append(
                 {'patient': self.identifier,
                 'pathway': 'simple_with_branch',
@@ -2402,6 +2438,8 @@ class SimpleBranchedPathway(object):
                  'event_type': 'attribute_assigned',
                  'time': self.env.now}
             )
+
+            self.total_patients_served += 1
             self.full_event_log.append(
                 {'patient': self.identifier,
                 'pathway': 'simple_with_branch',
