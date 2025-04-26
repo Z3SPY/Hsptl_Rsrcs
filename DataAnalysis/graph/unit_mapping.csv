@@ -7,7 +7,7 @@ Medicine,Medicine,Medicine
 Med/Surg,MedSurg,Medical Ward
 Surgery/Trauma,Surg Ward,Surgical Ward
 Discharge Lounge,Discharge,Discharge
-Medical/Surgical (Gynecology),GYN‑Step,Step-Down
+Medical/Surgical (Gynecology),GYN-Step,Step-Down
 Medicine/Cardiology,Cardiology,Medical Ward
 Thoracic Surgery,Surg Ward,Surgical Ward
 Vascular,Vascular,Other-Small
@@ -17,14 +17,14 @@ Neurology,Neurology,Neurology
 Surgery/Pancreatic/Biliary/Bariatric,Surgery/Panc,Surgical Ward
 Psychiatry,Psych,Psychiatry
 Hematology/Oncology,Oncology,Medical Ward
-Surgery/Vascular/Intermediate,Surg‑Step,Step-Down
+Surgery/Vascular/Intermediate,Surg-Step,Step-Down
 Surgical Intensive Care Unit (SICU),SICU,ICU
 Surgery,Surg Ward,Surgical Ward
 Med/Surg/GYN,MedSurg,Medical Ward
 PACU,PACU,PACU
 Cardiology Surgery Intermediate,Cardiology S,Other-Small
 Medical/Surgical Intensive Care Unit (MICU/SICU),ICU,ICU
-Hematology/Oncology Intermediate,Onc‑Step,Step-Down
+Hematology/Oncology Intermediate,Onc-Step,Step-Down
 Med/Surg/Trauma,MedSurg,Medical Ward
 Medicine/Cardiology Intermediate,Medicine/Car,Other-Small
 Cardiac Surgery,Cardiac Surg,Surgical Ward
@@ -33,7 +33,7 @@ Coronary Care Unit (CCU),Cardiology,Medical Ward
 Observation,Obs Unit,Observation
 Obstetrics Postpartum,OB Post,Medical Ward
 Neuro Surgical Intensive Care Unit (Neuro SICU),Neuro ICU,ICU
-Neuro Intermediate,Neuro‑Step,Step-Down
+Neuro Intermediate,Neuro-Step,Step-Down
 Obstetrics Antepartum,OB Ante,Medical Ward
 Surgical Intermediate,Surgical Int,Surgical Ward
 Trauma SICU (TSICU),Trauma SICU ,Other-Small

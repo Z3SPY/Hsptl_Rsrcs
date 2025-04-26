@@ -1,0 +1,35 @@
+Cardiac ICU
+Cardiac Surg
+Cardiology
+Cardiology S
+Discharge
+ED
+ED Obs
+GYN-Step
+ICU
+L&D
+MICU
+MedSurg
+Medicine
+Medicine/Car
+Neuro ICU
+Neuro Stepdo
+Neuro-Step
+Neurology
+Nursery
+OB Ante
+OB Post
+Obs Unit
+Obstetrics (
+Onc-Step
+Oncology
+PACU
+Psych
+SICU
+Surg Ward
+Surg-Step
+Surgery/Panc
+Surgical Int
+Trauma SICU 
+Tx Ward
+Vascular

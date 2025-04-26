@@ -207,8 +207,9 @@ class PPO_Agent:
             self.loss_logs["value"].append(vl)
             self.loss_logs["entropy"].append(ent)
 
-            print(f"Iter {it}/{ITERS} | Steps {total_steps} | Eps {self.episode_count}"
-                  f" | AvgRet {avg_ret:.2f} | pol {pl:.4f} | val {vl:.4f} | ent {ent:.4f}")
+            print(f"Iter {it}/{ITERS} | Steps {total_steps} | Eps {self.episode_count} "
+                f"| AvgRet {avg_ret:.2f} | pol {pl:.4f} | val {vl:.4f} | ent {ent:.4f} "
+                f"| Time {elapsed:.2f} seconds | Speed {speed:.2f} steps/sec")
 
         # close CSV
         self.csv_file.close()
