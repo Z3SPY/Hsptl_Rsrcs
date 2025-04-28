@@ -162,6 +162,9 @@ class CustomResource(simpy.Resource):
     def __init__(self, env, capacity, id_attribute=None):
         super().__init__(env, capacity)
         self.id_attribute = id_attribute
+        self.fatigue = 0.0
+        self.time_on_shift = 0.0
+        self.busy = False 
 
     def request(self, *args, **kwargs):
         # Add logic to handle the ID attribute when a request is made
@@ -483,6 +486,10 @@ class TraumaPathway:
         self.trauma_duration = -np.inf
         self.treat_duration = -np.inf
 
+        self.total_waiting_time = 0.0
+        self.total_patients_served = 0
+
+
     def execute(self):
         '''
         simulates the major treatment process for a patient
@@ -507,6 +514,8 @@ class TraumaPathway:
         self.total_waiting_time += max(0, waiting_time)
 
         triage_resource = yield self.args.triage.get()
+        triage_resource.busy = True
+
 
         # record the waiting time for triage
         self.wait_triage = waiting_time
@@ -539,7 +548,9 @@ class TraumaPathway:
         )
 
         # Resource is no longer in use, so put it back in the store 
+        triage_resource.busy = False
         self.args.triage.put(triage_resource) 
+        
         ###################################################
 
         # record the time that entered the trauma queue
@@ -558,6 +569,7 @@ class TraumaPathway:
         self.total_waiting_time += max(0, waiting_time)
         
         trauma_resource = yield self.args.trauma.get()
+        trauma_resource.busy = True
 
         self.full_event_log.append(
             {'patient': self.identifier,
@@ -588,6 +600,7 @@ class TraumaPathway:
             }
         )
         # Resource is no longer in use, so put it back in the store
+        trauma_resource.busy = False
         self.args.trauma.put(trauma_resource)
         
         #######################################################
@@ -608,6 +621,7 @@ class TraumaPathway:
         self.total_waiting_time += max(0, waiting_time)
 
         trauma_treatment_resource = yield self.args.cubicle_2.get()
+        trauma_treatment_resource.busy = True
 
         # record the waiting time for trauma
         self.wait_treat = waiting_time
@@ -648,7 +662,9 @@ class TraumaPathway:
         )
 
         # Resource is no longer in use, so put it back in the store
+        trauma_treatment_resource.busy = False
         self.args.cubicle_2.put(trauma_treatment_resource) 
+        
 
         #########################################################
 
@@ -702,6 +718,9 @@ class NonTraumaPathway(object):
         self.reg_duration = -np.inf
         self.exam_duration = -np.inf
         self.treat_duration = -np.inf
+
+        self.total_waiting_time = 0.0
+        self.total_patients_served = 0
 
     def execute(self):
         '''
@@ -779,7 +798,8 @@ class NonTraumaPathway(object):
         self.total_waiting_time += max(0, waiting_time)
 
         registration_resource = yield self.args.registration.get()
-            
+        registration_resource.busy = True
+
         # record the waiting time for registration
         self.wait_reg = waiting_time
         trace(f'registration of patient {self.identifier} at '
@@ -810,7 +830,9 @@ class NonTraumaPathway(object):
                 'resource_id': registration_resource.id_attribute}
         )
         # Resource is no longer in use, so put it back in the store
+        registration_resource.busy = False
         self.args.registration.put(registration_resource)
+        
         ########################################################
 
         # record the time that entered the evaluation queue
@@ -830,7 +852,8 @@ class NonTraumaPathway(object):
         self.total_waiting_time += max(0, waiting_time)
 
         examination_resource = yield self.args.exam.get()
-
+        examination_resource.busy = True
+        
         # record the waiting time for examination to begin
         self.wait_exam = waiting_time
         trace(f'examination of patient {self.identifier} begins '
@@ -892,6 +915,7 @@ class NonTraumaPathway(object):
             self.total_waiting_time += max(0, waiting_time)
 
             non_trauma_treatment_resource = yield self.args.cubicle_1.get()
+            non_trauma_treatment_resource.busy = True
 
             # record the waiting time for treatment
             self.wait_treat = waiting_time
@@ -924,7 +948,9 @@ class NonTraumaPathway(object):
             )
 
             # Resource is no longer in use, so put it back in the store
+            non_trauma_treatment_resource.busy = False
             self.args.cubicle_1.put(non_trauma_treatment_resource)
+            
         ##########################################################################
 
         # Return to what happens to all patients, regardless of whether they were sampled as needing treatment
@@ -1098,15 +1124,6 @@ class TreatmentCentreModel:
         # setup the arrival generator process
         self.env.process(self.arrivals_generator())
 
-        # setup the resource montioring process
-
-        # self.env.process(
-        #     self.interval_audit_utilisation(
-        #         resources=self.args.triage,
-        #         interval=1
-        #     )
-        # )
-
         resources_list = [
             {'resource_name': 'registration_clerks',
                 'resource_object': self.args.registration},
@@ -1146,24 +1163,6 @@ class TreatmentCentreModel:
         #     )
 
     def interval_audit_utilisation(self, resources, interval=1):
-        '''
-        Record utilisation at defined intervals. 
-
-        Needs to be passed to env.process when running model
-
-        Parameters:
-        ------
-        resource: SimPy resource object
-            The resource to monitor
-            OR 
-            a list of dictionaries containing simpy resource objects in the format
-            [{'resource_name':'my_resource', 'resource_object': resource}]
-
-        interval: int:
-            Time between audits. 
-            1 unit of time is 1 day in this model.  
-        '''
-
         while True:
             # Record time
             if isinstance(resources, list):
@@ -1209,7 +1208,7 @@ class TreatmentCentreModel:
             lambda_t = self.args.arrivals['arrival_rate'].iloc[t]
 
             # set to a large number so that at least 1 sample taken!
-            u = np.Inf
+            u = np.inf
 
             interarrival_time = 0.0
 
@@ -1250,6 +1249,26 @@ class TreatmentCentreModel:
 
             # start the pathway process for the patient
             self.env.process(new_patient.execute())
+
+    def get_average_wait_time(self):
+        total_wait_time = 0
+        total_patients = 0
+
+        all_patients = self.trauma_patients + self.non_trauma_patients
+
+
+        for patient in all_patients:
+            total_wait_time += max(0, patient.wait_treat)  # No need for hasattr check anymore
+
+            #print(total_wait_time)
+            total_patients += 1
+
+        if total_patients > 0:
+            return total_wait_time / total_patients
+        else:
+            return 0
+
+
 
 
 class SimulationSummary:
@@ -1945,7 +1964,7 @@ class TreatmentCentreModelSimpleNurseStepOnly:
             lambda_t = self.args.arrivals['arrival_rate'].iloc[t]
 
             # set to a large number so that at least 1 sample taken!
-            u = np.Inf
+            u = np.inf
 
             interarrival_time = 0.0
 
@@ -2213,7 +2232,7 @@ class TreatmentCentreModelSimpleBranchedPathway:
             lambda_t = self.args.arrivals['arrival_rate'].iloc[t]
 
             # set to a large number so that at least 1 sample taken!
-            u = np.Inf
+            u = np.inf
 
             interarrival_time = 0.0
 
@@ -2323,6 +2342,7 @@ class SimpleBranchedPathway(object):
         self.total_waiting_time += max(0, waiting_time)
 
         examination_resource = yield self.args.exam.get()
+        examination_resource.busy = True
 
         # record the waiting time for registration
         self.wait_exam = waiting_time
@@ -2355,7 +2375,9 @@ class SimpleBranchedPathway(object):
         )
 
         # Resource is no longer in use, so put it back in the store
+        examination_resource.busy = False
         self.args.exam.put(examination_resource) 
+        
         #########################################################
 
         # sample if patient requires treatment?
@@ -2386,6 +2408,7 @@ class SimpleBranchedPathway(object):
             self.total_waiting_time += max(0, waiting_time)
 
             non_trauma_treatment_resource = yield self.args.treatment.get()
+            non_trauma_treatment_resource.busy = True
 
             # record the waiting time for treatment
             self.wait_treat = waiting_time
@@ -2418,8 +2441,8 @@ class SimpleBranchedPathway(object):
             )
 
             # Resource is no longer in use, so put it back in the store
+            non_trauma_treatment_resource.busy = False
             self.args.treatment.put(non_trauma_treatment_resource)
-
             
             self.total_patients_served += 1
             self.full_event_log.append(
