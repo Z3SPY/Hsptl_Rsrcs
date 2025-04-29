@@ -6,6 +6,8 @@ from gymnasium.wrappers import RecordVideo
 import torch
 import torch.nn as nn
 import torch.optim as optim
+import glob
+import math
 
 # ----------------- CONFIG -----------------
 ENV_ID              = "LunarLander-v3"
@@ -73,11 +75,26 @@ class DQNAgent:
         self.start_time = time.time()
         self.returns = []
         self.losses = []
-        self.csv_file = open(CSV_LOG, 'w', newline='')
+
+        os.makedirs(LOG_DIR, exist_ok=True)
+
+        # Auto-increment run number
+        existing_runs = glob.glob(os.path.join(LOG_DIR, 'run*.csv'))
+        run_id = len(existing_runs) + 1
+        run_csv_path = os.path.join(LOG_DIR, f'run{run_id}.csv')
+
+
+        os.makedirs(LOG_DIR, exist_ok=True)
+
+        existing_runs = glob.glob(os.path.join(LOG_DIR, 'run*.csv'))
+        run_id = len(existing_runs) + 1
+        run_csv_path = os.path.join(LOG_DIR, f'run{run_id}.csv')
+
+        self.csv_file = open(run_csv_path, 'w', newline='')
         self.csv_writer = csv.writer(self.csv_file)
         self.csv_writer.writerow([
-            'episode','env_steps','elapsed_time_s','steps_per_s',
-            'episode_return','rolling20_return','avg_loss'
+            'iter', 'env_steps', 'elapsed_time_s', 'steps_per_s', 'computation_speed_sps',
+            'avg_return', 'cvar', 'policy_loss', 'value_loss', 'entropy', 'avg_loss'
         ])
 
     def fill_buffer(self):
@@ -139,9 +156,13 @@ class DQNAgent:
             speed = self.step_count / elapsed if elapsed>0 else 0.0
             # log CSV
             self.csv_writer.writerow([
-                epi, self.step_count, f"{elapsed:.2f}", f"{speed:.2f}",
-                f"{total_r:.2f}", f"{rolling[-1]:.2f}", f"{avg_loss:.4f}"
+                epi, self.step_count, elapsed, speed,
+                speed,
+                total_r, math.nan,  # no CVaR
+                math.nan, math.nan, math.nan,  # no policy_loss, value_loss, entropy
+                avg_loss
             ])
+
             if epi % 20 == 0:
                 print(f"[DQN] Ep {epi}/{TOTAL_EPISODES} | Ret {total_r:.2f} | "
                       f"20-ep avg {rolling[-1]:.2f} | eps {epsilon:.3f}")

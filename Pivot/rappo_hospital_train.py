@@ -1,4 +1,4 @@
-# 🚑 Corrected RA-PPO for HospitalSim (Shift-level batching)
+# 🚑 Corrected RA-PPO for HospitalSim (Full Month Structure)
 
 import os
 import time
@@ -14,11 +14,10 @@ import gym
 from hospital_env import HospitalSimEnv
 
 # ─── CONFIG ─────────────────────────────────────────────────────────────────
-LOG_DIR = "logs/rappo_hospital_logs"
+LOG_DIR = "logs/rappo_hospital_logs_v2"
 CSV_LOG = os.path.join(LOG_DIR, "rappo_log.csv")
 MODEL_PATH = os.path.join(LOG_DIR, "rappo_trained_hospital.pth")
 
-SHIFT_BATCH = 64             # How many shifts per update
 CLIP_EPS = 0.2
 LR = 3e-4
 GAMMA = 0.99
@@ -26,7 +25,7 @@ GAE_LAMBDA = 0.95
 ENT_COEF = 0.01
 N_EPOCHS = 4
 MINI_BATCH = 16
-ITERS = 100
+TOTAL_MONTHS = 200
 ALPHA = 0.25
 
 STEP_SIZE = 15
@@ -77,12 +76,10 @@ class RAPPOActorCritic(nn.Module):
 
     def forward(self, x):
         x = self.shared(x)
-
         if self.multidiscrete:
             policy_logits = [head(x) for head in self.policy_heads]
         else:
             policy_logits = self.policy_head(x)
-
         state_value = self.value_head(x)
         return policy_logits, state_value
 
@@ -111,36 +108,17 @@ def select_action(obs):
         logp = dist.log_prob(a)
         return a.item(), logp
 
-def run_single_shift():
-    obs = env.reset()
-    if isinstance(obs, tuple):
-        obs = obs[0]
-
-    action, logp = select_action(obs)
-
-    # Apply shift action
-    shift_obs, reward, terminated, _ = env.step(action)
-    done = terminated
-
-    # Full shift done
-    obs_t = torch.FloatTensor(obs).unsqueeze(0).to(device)
-    _, val = model(obs_t)
-
-    return obs, action, logp.item(), val.item(), reward, done
-
 def compute_gae(rews, vals, dones, last_v):
     T = len(rews)
     returns, advs = np.zeros(T), np.zeros(T)
     gae = 0
     vals = np.append(vals, last_v)
-
     for t in reversed(range(T)):
         mask = 1.0 - dones[t]
         delta = rews[t] + GAMMA * vals[t+1] * mask - vals[t]
         gae = delta + GAMMA * GAE_LAMBDA * mask * gae
         advs[t] = gae
         returns[t] = advs[t] + vals[t]
-
     return returns, advs
 
 def compute_cvar(returns, alpha=ALPHA):
@@ -151,25 +129,39 @@ def compute_cvar(returns, alpha=ALPHA):
 # ─── TRAINING ───────────────────────────────────────────────────────────────
 csv_file = open(CSV_LOG, "w", newline="")
 csv_writer = csv.writer(csv_file)
-csv_writer.writerow(["iter", "timesteps", "avg_return", "cvar_return"])
+csv_writer.writerow(["month", "timesteps", "avg_return", "cvar_return"])
 
 step_logs, return_logs, cvar_logs = [], [], []
 total_steps = 0
 start_time = time.time()
 
-for it in range(1, ITERS + 1):
-    mb_obs, mb_acts, mb_logps, mb_vals, mb_rews, mb_dones = [], [], [], [], [], []
+for month in range(1, TOTAL_MONTHS + 1):
+    obs = env.reset()
+    if isinstance(obs, tuple):
+        obs = obs[0]
 
-    for _ in range(SHIFT_BATCH):
-        obs, act, logp, val, rew, done = run_single_shift()
+    mb_obs, mb_acts, mb_logps, mb_vals, mb_rews, mb_dones = [], [], [], [], [], []
+    done = False
+
+    while not done:
+        action, logp = select_action(obs)
+        next_obs, reward, done, _ = env.step(action)
+
+        obs_t = torch.FloatTensor(obs).unsqueeze(0).to(device)
+        _, value = model(obs_t)
+
         mb_obs.append(obs)
-        mb_acts.append(act)
-        mb_logps.append(logp)
-        mb_vals.append(val)
-        mb_rews.append(rew)
+        mb_acts.append(action)
+        mb_logps.append(logp.item())
+        mb_vals.append(value.item())
+        mb_rews.append(reward)
         mb_dones.append(done)
 
-    total_steps += SHIFT_BATCH
+        obs = next_obs
+        if isinstance(obs, tuple):
+            obs = obs[0]
+
+    total_steps += len(mb_rews)
 
     returns, advantages = compute_gae(mb_rews, mb_vals, mb_dones, last_v=0)
     advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
@@ -180,11 +172,11 @@ for it in range(1, ITERS + 1):
     returns_flat = torch.FloatTensor(returns).to(device)
     advs_flat = torch.FloatTensor(advantages).to(device)
 
-    idxs = np.arange(SHIFT_BATCH)
+    idxs = np.arange(len(mb_rews))
     np.random.shuffle(idxs)
 
     for _ in range(N_EPOCHS):
-        for start in range(0, SHIFT_BATCH, MINI_BATCH):
+        for start in range(0, len(mb_rews), MINI_BATCH):
             batch_idx = idxs[start:start+MINI_BATCH]
 
             batch_obs = obs_flat[batch_idx]
@@ -215,25 +207,21 @@ for it in range(1, ITERS + 1):
             value_loss = 0.5 * (batch_returns - vals.squeeze()).pow(2).mean()
             entropy = dist.entropy().mean()
 
-            weights = (batch_returns <= np.percentile(batch_returns.cpu().numpy(), ALPHA * 100)).float().to(device)
-            policy_loss = (policy_loss * weights).mean()
-
             loss = policy_loss + 0.5 * value_loss - ENT_COEF * entropy
 
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
 
-    avg_ret = np.mean(mb_rews)
-    cvar_ret = compute_cvar(mb_rews)
+    avg_return = np.mean(mb_rews)
+    cvar_return = compute_cvar(mb_rews)
 
     step_logs.append(total_steps)
-    return_logs.append(avg_ret)
-    cvar_logs.append(cvar_ret)
+    return_logs.append(avg_return)
+    cvar_logs.append(cvar_return)
 
-    csv_writer.writerow([it, total_steps, f"{avg_ret:.2f}", f"{cvar_ret:.2f}"])
-
-    print(f"Iter {it}/{ITERS} | Steps {total_steps} | AvgRet {avg_ret:.2f} | CVaR {cvar_ret:.2f}")
+    csv_writer.writerow([month, total_steps, f"{avg_return:.2f}", f"{cvar_return:.2f}"])
+    print(f"Month {month}/{TOTAL_MONTHS} | Steps {total_steps} | AvgRet {avg_return:.2f} | CVaR {cvar_return:.2f}")
 
 csv_file.close()
 torch.save(model.state_dict(), MODEL_PATH)

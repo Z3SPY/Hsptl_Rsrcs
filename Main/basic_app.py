@@ -12,7 +12,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 import numpy as np
-from helper_functions import add_logo, mermaid, center_running
+from functions.helper_functions import add_logo, mermaid, center_running
 from modelclass import Scenario, multiple_replications
 from output_animation_functions import reshape_for_animations, generate_animation_df, generate_animation
 

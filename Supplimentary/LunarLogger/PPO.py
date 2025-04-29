@@ -9,6 +9,8 @@ import torch.optim as optim
 from torch.distributions import Categorical
 from gym.vector import SyncVectorEnv
 from gym.wrappers import RecordVideo
+import glob
+import math
 
 if not hasattr(np, "bool8"):
     np.bool8 = np.bool
@@ -62,13 +64,32 @@ class PPO_Agent:
         self.optimizer= optim.Adam(self.model.parameters(), lr=LR)
 
         # Logging setup
-        self.csv_file = open(CSV_LOG, "w", newline="")
-        self.csv     = csv.writer(self.csv_file)
+        os.makedirs(LOG_DIR, exist_ok=True)
+
+        # Auto-increment run number
+        existing_runs = glob.glob(os.path.join(LOG_DIR, 'run*.csv'))
+        run_id = len(existing_runs) + 1
+        run_csv_path = os.path.join(LOG_DIR, f'run{run_id}.csv')
+
+
+        # Create directory
+        os.makedirs(LOG_DIR, exist_ok=True)
+
+        existing_runs = glob.glob(os.path.join(LOG_DIR, 'run*.csv'))
+        run_id = len(existing_runs) + 1
+        run_csv_path = os.path.join(LOG_DIR, f'run{run_id}.csv')
+
+        self.csv_file = open(run_csv_path, "w", newline="")
+        self.csv = csv.writer(self.csv_file)
         self.csv.writerow([
-            "iter","timesteps","episodes",
-            "elapsed_s","steps_per_s","avg_return",
-            "policy_loss","value_loss","entropy"
+            'iter', 'env_steps', 'elapsed_time_s', 'steps_per_s', 'computation_speed_sps',
+            'avg_return', 'cvar', 'policy_loss', 'value_loss', 'entropy', 'avg_loss'
         ])
+
+
+
+
+
         self.start_time = time.time()
 
         # Metrics buffers
@@ -196,9 +217,14 @@ class PPO_Agent:
             speed   = total_steps / elapsed
 
             # log CSV & buffers
-            self.csv.writerow([it, total_steps, self.episode_count,
-                               f"{elapsed:.2f}", f"{speed:.2f}", f"{avg_ret:.2f}",
-                               f"{pl:.4f}", f"{vl:.4f}", f"{ent:.4f}"])
+            self.csv.writerow([
+                it, total_steps, elapsed, speed,
+                speed,
+                avg_ret, math.nan,  # no CVaR
+                pl, vl, ent,
+                math.nan  # avg_loss (DQN only)
+            ])
+
             self.step_logs.append(total_steps)
             self.ep_logs.append(self.episode_count)
             self.speed_logs.append(speed)

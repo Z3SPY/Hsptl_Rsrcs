@@ -1,6 +1,8 @@
 import os
 import time
 import csv
+import glob
+import math
 
 import numpy as np
 import torch
@@ -52,13 +54,25 @@ class RA_PPO_Agent:
         self.step_count = 0
         self.all_returns = []  # track every episode return for CVaR
         os.makedirs('logs/ra_ppo', exist_ok=True)
-        self.log_path = os.path.join('logs/ra_ppo', 'rapo_log.csv')
+
+
         self.plot_dir = os.path.join('logs/ra_ppo')
+        os.makedirs(self.plot_dir, exist_ok=True)
+
+        # Auto-increment run number
+        existing_runs = glob.glob(os.path.join(self.plot_dir, 'run*.csv'))
+        run_id = len(existing_runs) + 1
+        self.log_path = os.path.join(self.plot_dir, f'run{run_id}.csv')
+
         self.log_file = open(self.log_path, 'w', newline='')
         self.logger = csv.writer(self.log_file)
+
+
+
+
         self.logger.writerow([
-            'iteration', 'env_steps', 'elapsed_time_s', 'speed_steps_per_s',
-            'avg_return', 'cvar', 'policy_loss', 'value_loss', 'entropy'
+            'iter', 'env_steps', 'elapsed_time_s', 'steps_per_s', 'computation_speed_sps',
+            'avg_return', 'cvar', 'policy_loss', 'value_loss', 'entropy', 'avg_loss'
         ])
         self.return_logs, self.cvar_logs = [], []
         self.step_logs, self.speed_logs = [], []
@@ -196,8 +210,10 @@ class RA_PPO_Agent:
 
             self.logger.writerow([
                 i+1, self.step_count, elapsed, speed,
+                speed,  # computation speed is same as steps/sec for RAPPO
                 avg_ret, cvar,
-                losses['policy_loss'], losses['value_loss'], losses['entropy']
+                losses['policy_loss'], losses['value_loss'], losses['entropy'],
+                math.nan  # DQN's avg_loss: NaN for RAPPO
             ])
 
             print(f"Iter {i+1}/{iters} | Steps {self.step_count} | Time {elapsed:.1f}s | "

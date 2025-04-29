@@ -4,7 +4,10 @@ import gym
 from gym import spaces
 import numpy as np
 import simpy
-from model_classes import Scenario, TreatmentCentreModel, CustomResource
+from model_classes import Scenario, TreatmentCentreModel, CustomResource, SimulationSummary
+import pandas as pd
+import csv
+import os
 
 class HospitalSimEnv(gym.Env):
     """
@@ -13,7 +16,7 @@ class HospitalSimEnv(gym.Env):
     """
     metadata = {'render.modes': []}
 
-    def __init__(self, sim_config, step_size=60, alpha=5.0, beta=0.2, gamma=0.1, delta=0.01, epsilon=0.05, rc_period=20160, cost_mode='diverse'):
+    def __init__(self, sim_config, step_size=15, alpha=5.0, beta=0.2, gamma=0.1, delta=0.01, epsilon=0.05, rc_period=20160, cost_mode='diverse'):
 
         super().__init__()
         
@@ -27,6 +30,7 @@ class HospitalSimEnv(gym.Env):
         self.gamma = gamma
         self.delta = delta
         self.cost_mode = cost_mode
+        self.cur_reward = 0
 
         # Resource definitions
         self.resource_targets = ['triage', 'registration', 'exam', 'trauma', 'cubicle_1', 'cubicle_2']
@@ -38,23 +42,31 @@ class HospitalSimEnv(gym.Env):
             'cubicle_1': 1.2,
             'cubicle_2': 2.5,
         }
+
         self.resource_capacity = {res: sim_config.get(f'n_{res}', 1) for res in self.resource_targets}
 
         # Pending resource changes (for delayed add/remove)
         self.pending_resource_changes = []
         self.resource_change_delay = 480  # 8 hours = 480 minutes
 
+
+        # Wait TImes
+        # Initialize wait time tracking
+        self.wait_time_totals = {unit: 0.0 for unit in ["triage", "registration", "exam", "trauma", "cubicle_1", "cubicle_2"]}
+        self.wait_time_counts = {unit: 0 for unit in ["triage", "registration", "exam", "trauma", "cubicle_1", "cubicle_2"]}
+
+
         # Shift management
         self.shift_duration = 480  # 8 hours
         self.time_in_shift = 0
         self.is_shift_planning = True
         self.total_staff_pool = {
-            'triage': 20,
-            'registration': 20,
-            'exam': 15,
+            'triage': 10,
+            'registration': 10,
+            'exam': 10,
             'trauma': 10,
-            'cubicle_1': 25,
-            'cubicle_2': 10
+            'cubicle_1': 17,
+            'cubicle_2': 17
         }
         self.active_staff = {k: 0 for k in self.total_staff_pool.keys()}
         self.resting_staff = {k: self.total_staff_pool[k] for k in self.total_staff_pool.keys()}
@@ -107,11 +119,20 @@ class HospitalSimEnv(gym.Env):
         # Randomize small trauma probability variations
         base_p = cfg.get('prob_trauma', 0.12)
         cfg['prob_trauma'] = float(np.clip(base_p + np.random.normal(0, 0.02), 0.0, 1.0))
+        cfg['model'] = "full"
 
         # Create new scenario
         self.scenario = Scenario(**cfg)
         self.model = TreatmentCentreModel(self.scenario)
+        self.model.hospitalenv = self  
+        self.model.rc_period = self.rc_period
+
+        
+        
+
+        
         self.model.env.process(self.model.arrivals_generator())
+
 
         self.current_time = 0.0
 
@@ -311,36 +332,50 @@ class HospitalSimEnv(gym.Env):
 
 
     def _print_shift_summary(self, shift_reward):
-        print(f"\n=== SHIFT COMPLETED ===")
+        print("\n" + "="*40)
+        print(f"=== SHIFT COMPLETED ===")
         print(f"Time: {self.current_time:.0f} minutes")
-        print(f"Active Staff:")
-        for k, v in self.active_staff.items():
-            print(f"  {k}: {v} assigned")
-        print(f"Resting Staff:")
-        for k, v in self.resting_staff.items():
-            print(f"  {k}: {v} resting")
+
+        # Active Staff
+        print("Active Staff:")
+        for unit, count in self.active_staff.items():
+            print(f"  {unit}: {count} assigned")
+
+        # Resting Staff
+        print("Resting Staff:")
+        for unit, count in self.resting_staff.items():
+            print(f"  {unit}: {count} resting")
+
+        # Discharges
         discharges = self._count_shift_discharges()
         print(f"Patients Discharged This Shift: {discharges}")
+
+        # Fatigue
         avg_fatigue = self._average_fatigue_by_unit()
-        print(f"Average Fatigue by Unit:")
+        avg_fatigue_shift = np.mean(list(avg_fatigue.values()))
+        print("\n=== Fatigue Statistics ===")
+        print(f"Average Fatigue Across Units: {avg_fatigue_shift:.2f}")
+        print("Fatigue Breakdown by Unit:")
         for unit, fatigue in avg_fatigue.items():
             print(f"  {unit}: {fatigue:.1f}")
 
-        print("="*40)
-        print(f"=== SHIFT SUMMARY ===")
-        print(f"Shift Time: {self.current_time:.0f} minutes")
-        print(f"Total Reward This Shift: {self.reward_this_shift:.2f}")
-        avg_fatigue_shift = np.mean(list(avg_fatigue.values()))
-        print(f"Average Fatigue Across Units: {avg_fatigue_shift:.2f}")
+        # Wait Times
+        print("\n=== Wait Time Statistics ===")
+        avg_wait_times = {}
+        for unit in self.wait_time_totals.keys():
+            total = self.wait_time_totals[unit]
+            count = self.wait_time_counts[unit]
+            avg_wait = (total / count) if count > 0 else 0.0
+            avg_wait_times[unit] = avg_wait
+        print("Average Wait Times by Unit (minutes):")
+        for unit, wait in avg_wait_times.items():
+            print(f"  {unit}: {wait:.1f}")
 
-        print("Fatigue Breakdown by Unit:")
-        for unit, fat in avg_fatigue.items():
-            print(f"  {unit}: {fat:.1f}")
-
+        # Active and Resting Staff Counts
+        print("\n=== Staffing Summary ===")
         print("Active Staff per Unit:")
         for unit, count in self.active_staff.items():
             print(f"  {unit}: {count}")
-
         print("Resting Staff per Unit:")
         for unit, count in self.resting_staff.items():
             print(f"  {unit}: {count}")
@@ -349,6 +384,26 @@ class HospitalSimEnv(gym.Env):
         print(f"Shift Reward: {shift_reward:.2f}")
         print("="*40)
         print("="*40)
+
+        # Reset wait trackers after shift
+        self.wait_time_totals = {
+            "triage": 0.0,
+            "registration": 0.0,
+            "exam": 0.0,
+            "trauma": 0.0,
+            "cubicle_1": 0.0,
+            "cubicle_2": 0.0
+        }
+        self.wait_time_counts = {
+            "triage": 0,
+            "registration": 0,
+            "exam": 0,
+            "trauma": 0,
+            "cubicle_1": 0,
+            "cubicle_2": 0
+        }
+
+
         
 
     def step(self, action):
@@ -372,7 +427,7 @@ class HospitalSimEnv(gym.Env):
         self._update_fatigue()
 
         # ─── REWARD COMPUTATION ───────────────────────────────────────────────────
-        reward = self._compute_reward(old_time, next_time)
+        reward = self._compute_step_reward(old_time, next_time)
         self.reward_this_shift += reward
 
         # ─── SHIFT END CHECK ──────────────────────────────────────────────────────
@@ -382,6 +437,47 @@ class HospitalSimEnv(gym.Env):
             # Shift finished, print shift summary
             self._print_shift_summary(self.reward_this_shift)
 
+
+            # Add shift bonus
+            shift_bonus = self._compute_shift_bonus()
+            reward += shift_bonus
+
+            # Reset counters for new shift
+            self.cur_reward = self.reward_this_shift
+            self.reward_this_shift = 0.0
+
+
+            print("Shift Completed with Bonus Reward", shift_bonus)
+
+            # run results
+            summary = SimulationSummary(self.model)
+            summary.process_run_results_live()
+
+            # Now you can access mid-shift wait times, etc:
+            mean_triage_wait = summary.results.get('01a_triage_wait', 0.0)
+            mean_exam_wait = summary.results.get('03a_examination_wait', 0.0)
+            mean_treat_wait_nontrauma = summary.results.get('04a_treatment_wait(non_trauma)', 0.0)
+            mean_treat_wait_trauma = summary.results.get('07a_treatment_wait(trauma)', 0.0)
+            throughput = summary.results.get('09_throughput', 0.0)
+
+            # You can now also PRINT or USE these for your reward shaping!
+            print(f"[Summary] Mean Triage Wait: {mean_triage_wait:.2f} mins")
+            print(f"[Summary] Mean Exam Wait: {mean_exam_wait:.2f} mins")
+            print(f"[Summary] Mean Non-Trauma Treat Wait: {mean_treat_wait_nontrauma:.2f} mins")
+            print(f"[Summary] Mean Trauma Treat Wait: {mean_treat_wait_trauma:.2f} mins")
+            print(f"[Summary] Throughput: {throughput:.2f}")
+
+            self.cumulative_triage_waits.append(summary.results.get('01a_triage_wait', 0.0))
+            self.cumulative_registration_waits.append(summary.results.get('02a_registration_wait', 0.0))
+            self.cumulative_exam_waits.append(summary.results.get('03a_examination_wait', 0.0))
+            self.cumulative_trauma_waits.append(summary.results.get('05a_stabilisation_wait', 0.0))
+            self.cumulative_cub1_waits.append(summary.results.get('04a_treatment_wait(non_trauma)', 0.0))
+            self.cumulative_cub2_waits.append(summary.results.get('07a_treatment_wait(trauma)', 0.0))
+            self.cumulative_fatigues.append(np.mean(list(self._average_fatigue_by_unit().values())))
+            self.cumulative_throughput.append(summary.results.get('09_throughput', 0.0))
+            
+            
+
         # ─── PENDING RESOURCE CHANGES ─────────────────────────────────────────────
         self._process_pending_actions()
 
@@ -389,6 +485,25 @@ class HospitalSimEnv(gym.Env):
         obs = self._get_observation()
         done = (self.current_time >= self.rc_period)
         info = {}
+
+
+        # ---- Accumulate for External Summary ----
+        if not hasattr(self, "cumulative_rewards"):
+            self.cumulative_rewards = []
+            self.cumulative_triage_waits = []
+            self.cumulative_exam_waits = []
+            self.cumulative_registration_waits = []
+            self.cumulative_trauma_waits = []
+            self.cumulative_cub1_waits = []
+            self.cumulative_cub2_waits = []
+            self.cumulative_fatigues = []
+            self.cumulative_throughput = []
+
+        # Log this step reward
+        self.cumulative_rewards.append(reward)
+
+       
+
 
         return obs, reward, done, info
 
@@ -450,53 +565,64 @@ class HospitalSimEnv(gym.Env):
             total_cost += self.resource_capacity[res] * cost
         return total_cost
 
-    def _compute_reward(self, t0, t1):
+    def _compute_step_reward(self, t0, t1):
+        """Compute reward during a regular step (per hour)."""
         new_events = [e for e in self.model.full_event_log if t0 < e['time'] <= t1]
-        
-        # 1. Throughput
+
         discharges = sum(1 for e in new_events if e['event'] == 'depart')
-        active_staff_total = sum(self.active_staff.values())
-        efficiency_score = (discharges / active_staff_total) if active_staff_total > 0 else 0
+        avg_wait = self.model.get_average_wait_time()
 
-        # 2. Queue load
-        total_queue = 0
-        for res, wait_tag, start_tag in zip(
-            ['triage', 'registration', 'exam', 'trauma', 'cubicle_1', 'cubicle_2'],
-            ['triage_wait_begins', 'MINORS_registration_wait_begins', 'MINORS_examination_wait_begins',
-            'TRAUMA_stabilisation_wait_begins', 'MINORS_treatment_wait_begins', 'TRAUMA_treatment_wait_begins'],
-            ['triage_begins', 'MINORS_registration_begins', 'MINORS_examination_begins',
-            'TRAUMA_stabilisation_begins', 'MINORS_treatment_begins', 'TRAUMA_treatment_begins']):
-            total_queue += max(0, sum(1 for e in self.model.full_event_log if e['event'] == wait_tag) -
-                                sum(1 for e in self.model.full_event_log if e['event'] == start_tag))
-
-        # 3. Cost
-        resource_cost = sum(self.cost_per_unit.get(res, 1.0) * self.active_staff.get(res, 0) for res in self.resource_targets)
-
-        # 4. Fatigue
+        idle_resources = sum(len(getattr(self.model.args, res).items) for res in self.resource_targets)
+        
         total_fatigue = 0.0
-        total_active = 0
+        active_count = 0
         for res_name in self.resource_targets:
             store = getattr(self.model.args, res_name)
             if hasattr(store, "items"):
-                for r in store.items:
-                    if hasattr(r, "fatigue"):
-                        total_fatigue += r.fatigue
-                        total_active += 1
-        avg_fatigue = (total_fatigue / total_active) if total_active > 0 else 0.0
-
-        # 5. Surge survival (Optional)
-        # For now assume 0
-        surge_bonus = 0
+                for resource in store.items:
+                    if hasattr(resource, "fatigue"):
+                        total_fatigue += resource.fatigue
+                        active_count += 1
+        avg_fatigue = (total_fatigue / active_count) if active_count > 0 else 0.0
 
         reward = (
-            10.0 * efficiency_score
-            - 0.5 * total_queue
-            - 0.05 * resource_cost
-            - 0.1 * avg_fatigue
-            + surge_bonus
+            + 1.0 * discharges
+            - 0.05 * avg_wait
+            - 0.05 * avg_fatigue
+            - 0.02 * idle_resources
         )
+        return np.clip(reward, -100, 100)
 
-        return reward
+    def _compute_shift_bonus(self):
+        """Compute reward at the end of a shift."""
+        discharges = self._count_shift_discharges()
+
+        avg_wait = self.model.get_average_wait_time()
+
+        total_fatigue = 0.0
+        active_count = 0
+        for res_name in self.resource_targets:
+            store = getattr(self.model.args, res_name)
+            if hasattr(store, "items"):
+                for resource in store.items:
+                    if hasattr(resource, "fatigue"):
+                        total_fatigue += resource.fatigue
+                        active_count += 1
+        avg_fatigue = (total_fatigue / active_count) if active_count > 0 else 0.0
+
+        resource_cost = sum(self.active_staff[k] * self.cost_per_unit.get(k, 1.0) for k in self.active_staff)
+
+        shift_bonus = (
+            + 50 * discharges
+            - 2.0 * avg_wait
+            - 3.0 * avg_fatigue
+            - 1.0 * resource_cost
+        )
+        return np.clip(shift_bonus, -500, 500)
+
+
+  
+
 
 
 
