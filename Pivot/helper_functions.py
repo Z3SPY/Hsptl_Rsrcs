@@ -51,21 +51,7 @@ def add_logo():
     st.markdown(
         """
         <style>
-            [data-testid="stSidebarNav"] {
-                background-image: url(https://raw.githubusercontent.com/hsma-programme/Teaching_DES_Concepts_Streamlit/main/resources/hsma_logo_transparent_background_small.png);
-                background-repeat: no-repeat;
-                padding-top: 175px;
-                background-position: 40px 30px;
-            }
-            [data-testid="stSidebarNav"]::before {
-                content: "The DES Playground";
-                padding-left: 20px;
-                margin-top: 50px;
-                font-size: 30px;
-                position: relative;
-                top: 100px;
-            }
-
+       
         </style>
         """,
         unsafe_allow_html=True,

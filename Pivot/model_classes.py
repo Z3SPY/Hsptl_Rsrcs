@@ -1,36 +1,23 @@
-#!/usr/bin/env python
-# coding: utf-8
-
-'''
-FirstTreatment: A health clinic based in the US.
-
-This example is based on exercise 13 from Nelson (2013) page 170.
- 
-Nelson. B.L. (2013). Foundations and methods of stochastic simulation.
-Patients arrive to the health clinic between 6am and 12am following a 
-non-stationary poisson process. After 12am arriving patients are diverted 
-elsewhere and remaining WIP is completed.  
-On arrival, all patients quickly sign-in and are triaged.   
-
-The health clinic expects two types of patient arrivals: 
-
-**Trauma arrivals:**
-patients with severe illness and trauma that must first be stablised in a 
-trauma room. These patients then undergo treatment in a cubicle before being 
-discharged.
-
-**Non-trauma arrivals**
-patients with minor illness and no trauma go through registration and 
-examination activities. A proportion of non-trauma patients require treatment
-in a cubicle before being dicharged. 
-
-In this model treatment of trauma and non-trauma patients is modelled seperately 
-'''
+"Maybe Add a description here"
 
 import itertools
+import random
 import numpy as np
 import pandas as pd
 import simpy
+import json
+
+class Discrete:
+    def __init__(self, weights, random_seed=None):
+        self.weights = weights
+        self.values = list(range(1, len(weights) + 1))
+        self.rng = np.random.default_rng(random_seed)
+
+    def sample(self):
+        return self.rng.choice(self.values, p=self.weights)
+
+
+
 
 from distribution_classes import (
     Exponential, Normal, Uniform, Bernoulli, Lognormal)
@@ -72,7 +59,6 @@ DEFAULT_PROB_TRAUMA = 0.12
 # The data for arrival rates varies between clinic opening at 6am and closure at
 # 12am.
 
-NSPP_PATH = 'resources/ed_arrivals.csv'
 
 OVERRIDE_ARRIVAL_RATE = False
 MANUAL_ARRIVAL_RATE_VALUE = 1
@@ -89,6 +75,11 @@ DEFAULT_N_CUBICLES_1 = 1
 
 # trauma pathway cubicles
 DEFAULT_N_CUBICLES_2 = 1
+
+#WARD AND ICU
+DEFAULT_N_WARD = 10
+DEFAULT_N_ICU = 10
+
 
 # Simulation model run settings
 
@@ -230,6 +221,8 @@ class Scenario:
                  n_trauma=DEFAULT_N_TRAUMA,
                  n_cubicles_1=DEFAULT_N_CUBICLES_1,
                  n_cubicles_2=DEFAULT_N_CUBICLES_2,
+                 n_ward=DEFAULT_N_WARD,
+                 n_icu=DEFAULT_N_ICU,
                  triage_mean=DEFAULT_TRIAGE_MEAN,
                  reg_mean=DEFAULT_REG_MEAN,
                  reg_var=DEFAULT_REG_VAR,
@@ -242,7 +235,6 @@ class Scenario:
                  non_trauma_treat_var=DEFAULT_NON_TRAUMA_TREAT_VAR,
                  non_trauma_treat_p=DEFAULT_NON_TRAUMA_TREAT_P,
                  prob_trauma=DEFAULT_PROB_TRAUMA,
-                 arrival_df=NSPP_PATH,
                  override_arrival_rate=OVERRIDE_ARRIVAL_RATE,
                  manual_arrival_rate=MANUAL_ARRIVAL_RATE_VALUE,
                  model="full"
@@ -331,7 +323,6 @@ class Scenario:
         self.non_trauma_treat_p = non_trauma_treat_p
         self.prob_trauma = prob_trauma
         self.manual_arrival_rate = manual_arrival_rate
-        self.arrival_df = arrival_df
         self.override_arrival_rate = override_arrival_rate
         self.model = model
 
@@ -339,7 +330,25 @@ class Scenario:
 
         # count of each type of resource
         self.init_resource_counts(n_triage, n_reg, n_exam, n_trauma,
-                                  n_cubicles_1, n_cubicles_2)
+                                  n_cubicles_1, n_cubicles_2, n_icu, n_ward)
+        
+        # =================================
+        # LOS Sampling
+        # =================================
+        self.unit_transition_probs = {
+            1: [0.9, 0.1, 0.0],
+            2: [0.6, 0.3, 0.1],
+            3: [0.4, 0.4, 0.2],
+            4: [0.2, 0.5, 0.3],
+            5: [0.1, 0.4, 0.5],
+        }
+        self.discharge_los = {i: 0.1 for i in range(1, 6)}
+        self.ward_los = {1: 1.5, 2: 2.5, 3: 3.5, 4: 5.0, 5: 6.0}
+        self.icu_los = {1: 2.5, 2: 3.5, 3: 5.0, 4: 7.0, 5: 10.0}
+        # =================================     
+        
+        
+
 
     def set_random_no_set(self, random_number_set):
         '''
@@ -354,7 +363,7 @@ class Scenario:
         self.init_sampling()
 
     def init_resource_counts(self, n_triage, n_reg, n_exam, n_trauma,
-                             n_cubicles_1, n_cubicles_2):
+                             n_cubicles_1, n_cubicles_2, n_icu, n_ward):
         '''
         Init the counts of resources to default values...
         '''
@@ -366,6 +375,9 @@ class Scenario:
         # non-trauma (1), trauma (2) treatment cubicles
         self.n_cubicles_1 = n_cubicles_1
         self.n_cubicles_2 = n_cubicles_2
+
+        self.n_ward_beds=n_ward
+        self.n_icu_beds=n_icu
 
     def init_sampling(self):
         '''
@@ -413,18 +425,22 @@ class Scenario:
         # probability of non-trauma versus trauma patient
         self.p_trauma_dist = Bernoulli(self.prob_trauma,
                                        random_seed=self.seeds[7])
+        
+        self.severity_dist = Discrete([0.15, 0.25, 0.3, 0.2, 0.1], random_seed=self.seeds[10])
+
 
         # init sampling for non-stationary poisson process
         self.init_nspp()
 
     def init_nspp(self):
 
-        # read arrival profile
-        self.arrivals = pd.read_csv(NSPP_PATH)  # pylint: disable=attribute-defined-outside-init
-        self.arrivals['mean_iat'] = 60 / self.arrivals['arrival_rate']
+        with open('resources/empirical_params.json', 'r') as f:
+            params = json.load(f)        
 
-        # maximum arrival rate (smallest time between arrivals)
-        self.lambda_max = self.arrivals['arrival_rate'].max()  # pylint: disable=attribute-defined-outside-init
+
+        self.arrivals = pd.DataFrame({'arrival_rate': params['lambda_hour']})
+        self.arrivals['mean_iat'] = 60 / self.arrivals['arrival_rate']
+        self.lambda_max = self.arrivals['arrival_rate'].max()
 
         # thinning exponential
         if self.override_arrival_rate is True:
@@ -454,7 +470,7 @@ class TraumaPathway:
     Following treatment they are discharged.
     '''
 
-    def __init__(self, identifier, env, args, model, full_event_log):
+    def __init__(self, identifier, env, args, full_event_log, severity = None):
         '''
         Constructor method
 
@@ -475,7 +491,6 @@ class TraumaPathway:
         self.identifier = identifier
         self.env = env
         self.args = args
-        self.model = model 
         self.full_event_log = full_event_log
 
         # metrics
@@ -489,8 +504,9 @@ class TraumaPathway:
         self.trauma_duration = -np.inf
         self.treat_duration = -np.inf
 
-        self.total_waiting_time = 0.0
-        self.total_patients_served = 0
+        self.severity = severity or self.args.severity_dist.sample()
+
+
 
 
     def execute(self):
@@ -522,9 +538,7 @@ class TraumaPathway:
         # record the waiting time for triage
         self.wait_triage = self.env.now - waiting_time_start
 
-        self.total_waiting_time += max(0,  self.wait_triage)
-        self.model.hospitalenv.wait_time_totals["triage"] += max(0, self.wait_triage)
-        self.model.hospitalenv.wait_time_counts["triage"] += 1
+
 
         trace(f'patient {self.identifier} triaged to trauma '
                 f'{self.env.now:.3f}')
@@ -580,9 +594,6 @@ class TraumaPathway:
         # record the waiting time for trauma
         self.wait_trauma =  self.env.now - waiting_time_start
 
-        self.total_waiting_time += max(0, self.wait_trauma)
-        self.model.hospitalenv.wait_time_totals["trauma"] += max(0, self.wait_trauma)
-        self.model.hospitalenv.wait_time_counts["trauma"] += 1
 
 
         self.full_event_log.append(
@@ -638,9 +649,7 @@ class TraumaPathway:
         # record the waiting time for trauma
         self.wait_treat =self.env.now - waiting_time_start
 
-        self.total_waiting_time += max(0, self.wait_treat)
-        self.model.hospitalenv.wait_time_totals["cubicle_2"] += max(0, self.wait_treat)
-        self.model.hospitalenv.wait_time_counts["cubicle_2"] += 1
+
 
         trace(f'treatment of patient {self.identifier} at '
                 f'{self.env.now:.3f}')
@@ -669,7 +678,6 @@ class TraumaPathway:
              'resource_id': trauma_treatment_resource.id_attribute}
         )
 
-        self.total_patients_served += 1
         self.full_event_log.append(
             {'patient': self.identifier,
             'pathway': 'Shared',
@@ -699,7 +707,7 @@ class NonTraumaPathway(object):
     Following treatment they are discharged.
     '''
 
-    def __init__(self, identifier, env, args, model, full_event_log):
+    def __init__(self, identifier, env, args, full_event_log, severity = None):
         '''
         Constructor method
 
@@ -719,7 +727,6 @@ class NonTraumaPathway(object):
         self.identifier = identifier
         self.env = env
         self.args = args
-        self.model = model 
         self.full_event_log = full_event_log
 
         # triage resource
@@ -738,8 +745,10 @@ class NonTraumaPathway(object):
         self.exam_duration = -np.inf
         self.treat_duration = -np.inf
 
-        self.total_waiting_time = 0.0
-        self.total_patients_served = 0
+        # Severity
+        self.severity = severity or self.args.severity_dist.sample()
+
+
 
     def execute(self):
         '''
@@ -751,6 +760,8 @@ class NonTraumaPathway(object):
         4.1 40% discharged
         4.2 60% treatment then discharge
         '''
+
+
         # record the time of arrival and entered the triage queue
         self.arrival = self.env.now
         self.full_event_log.append(
@@ -771,9 +782,6 @@ class NonTraumaPathway(object):
         # record the waiting time for triage
         self.wait_triage = self.env.now - waiting_time_start
 
-        self.model.hospitalenv.wait_time_totals["triage"] += max(0, self.wait_triage)
-        self.model.hospitalenv.wait_time_counts["triage"] += 1
-        self.total_waiting_time += max(0, self.wait_triage)
 
         trace(f'patient {self.identifier} triaged to minors '
                 f'{self.env.now:.3f}')
@@ -828,9 +836,7 @@ class NonTraumaPathway(object):
         # record the waiting time for registration
         self.wait_reg = self.env.now - waiting_time_start
         
-        self.total_waiting_time += max(0, self.wait_reg)
-        self.model.hospitalenv.wait_time_totals["registration"] += max(0, self.wait_reg)
-        self.model.hospitalenv.wait_time_counts["registration"] += 1
+
 
         trace(f'registration of patient {self.identifier} at '
                 f'{self.env.now:.3f}')
@@ -888,9 +894,7 @@ class NonTraumaPathway(object):
         # record the waiting time for examination to begin
         self.wait_exam = self.env.now - self.arrival_exam
 
-        self.total_waiting_time += max(0, self.wait_exam)
-        self.model.hospitalenv.wait_time_totals["exam"] += max(0, self.wait_exam)
-        self.model.hospitalenv.wait_time_counts["exam"] += 1
+
 
         trace(f'examination of patient {self.identifier} begins '
                 f'{self.env.now:.3f}')
@@ -945,6 +949,7 @@ class NonTraumaPathway(object):
                  'event_type': 'queue',
                  'time': self.env.now}
             )
+
             ###################################################
             # request treatment cubicle
             waiting_time_start = self.env.now
@@ -954,12 +959,6 @@ class NonTraumaPathway(object):
 
             # record the waiting time for treatment
             self.wait_treat = self.env.now - waiting_time_start
-
-
-            self.total_waiting_time += max(0, self.wait_treat)
-            self.model.hospitalenv.wait_time_totals["cubicle_1"] += max(0, self.wait_treat)
-            self.model.hospitalenv.wait_time_counts["cubicle_1"] += 1
-        
 
             
             trace(f'treatment of patient {self.identifier} begins '
@@ -995,9 +994,57 @@ class NonTraumaPathway(object):
             self.args.cubicle_1.put(non_trauma_treatment_resource)
             
         ##########################################################################
+        
+        if self.severity not in self.args.unit_transition_probs:
+            print(f"[WARNING] Severity {self.severity} unexpected — defaulting to discharge.")
+            destination = 'discharge'
+        else:
+            probs = self.args.unit_transition_probs[self.severity]
+            destination = random.choices(['discharge', 'ward', 'icu'], weights=probs)[0]
+
+        if destination == 'ward':
+            with self.args.ward_beds.request() as req:
+                yield req
+                los = self.args.ward_los.get(self.severity, 8.0)
+                yield self.env.timeout(los)
+                self.full_event_log.append({
+                    'patient': self.identifier,
+                    'event': 'ward_discharge',
+                    'unit': 'ward',
+                    'severity': self.severity,
+                    'time': self.env.now
+                })
+
+        elif destination == 'icu':
+            with self.args.icu_beds.request() as req:
+                yield req
+                los = self.args.icu_los.get(self.severity, 12.0)
+                yield self.env.timeout(los)
+                self.full_event_log.append({
+                    'patient': self.identifier,
+                    'event': 'icu_discharge',
+                    'unit': 'icu',
+                    'severity': self.severity,
+                    'time': self.env.now
+                })
+
+        else:
+            self.full_event_log.append({
+                'patient': self.identifier,
+                'event': 'direct_discharge',
+                'unit': 'discharge',
+                'severity': self.severity,
+                'time': self.env.now
+            })
+
+
+
+
+        ##########################################################################
+
+
 
         # Return to what happens to all patients, regardless of whether they were sampled as needing treatment
-        self.total_patients_served += 1
         self.full_event_log.append(
             {'patient': self.identifier,
             'pathway': 'Shared',
@@ -1041,8 +1088,6 @@ class TreatmentCentreModel:
         self.utilisation_audit = []
 
         # ADDED 
-        self.total_patients_served = 0
-        self.total_waiting_time = 0.0  # in minutes
 
 
 
@@ -1146,6 +1191,15 @@ class TreatmentCentreModel:
                     id_attribute = i+1)
                 )
 
+        # Beds 
+        self.ward_beds = simpy.Resource(self.env, capacity=10)
+        self.icu_beds = simpy.Resource(self.env, capacity=5)
+
+        # Inject back into args so patients can access it
+        self.args.ward_beds = self.ward_beds
+        self.args.icu_beds = self.icu_beds
+
+
     def run(self, results_collection_period=DEFAULT_RESULTS_COLLECTION_PERIOD):
         '''
         Conduct a single run of the model in its current 
@@ -1237,79 +1291,88 @@ class TreatmentCentreModel:
 
     def arrivals_generator(self):
         ''' 
-        Simulate the arrival of patients to the model
+        Simulate the arrival of patients to the model.
 
-        Patients either follow a TraumaPathway or
-        NonTraumaPathway simpy process.
-
-        Non stationary arrivals implemented via Thinning acceptance-rejection 
-        algorithm.
+        Patients either follow a TraumaPathway or NonTraumaPathway SimPy process.
+        Non-stationary Poisson arrivals are implemented via Thinning 
+        acceptance-rejection algorithm.
         '''
-        # while self.env.now < self.rc_period:
-        # if int(round(self.env.now,0)) % 10 == 0:
         for patient_count in itertools.count():
-            # this give us the index of dataframe to use
-            t = int(self.env.now // 60) % self.args.arrivals.shape[0]
-            lambda_t = self.args.arrivals['arrival_rate'].iloc[t]
+            # Determine current hour (0–23) for hourly λ lookup
+            hour_index = int(self.env.now // 60) % self.args.arrivals.shape[0]
+            lambda_t = self.args.arrivals['arrival_rate'].iloc[hour_index]
 
-            # set to a large number so that at least 1 sample taken!
+            # Initialize interarrival time and sampling trigger
             u = np.inf
-
             interarrival_time = 0.0
 
             if self.args.override_arrival_rate:
+                # Fixed/stationary Poisson arrivals (e.g., debugging mode)
                 interarrival_time += self.args.arrival_dist.sample()
             else:
-                # reject samples if u >= lambda_t / lambda_max
+                # Empirical non-stationary Poisson arrivals via thinning
                 while u >= (lambda_t / self.args.lambda_max):
                     interarrival_time += self.args.arrival_dist.sample()
                     u = self.args.thinning_rng.sample()
 
-            # iat
+            # Wait for sampled interarrival time
             yield self.env.timeout(interarrival_time)
 
-            trace(f'patient {patient_count} arrives at: {self.env.now:.3f}')
+            # Log arrival event
+            trace(f"[Arrival] Patient {patient_count} at time {self.env.now:.2f} (λ = {lambda_t:.2f})")
+            self.full_event_log.append({
+                'patient': patient_count,
+                'pathway': 'Shared',
+                'event': 'arrival',
+                'event_type': 'arrival_departure',
+                'time': self.env.now
+            })  
 
-            self.full_event_log.append(
-                {'patient': patient_count,
-                 'pathway': 'Shared',
-                 'event': 'arrival',
-                 'event_type': 'arrival_departure',
-                 'time': self.env.now}
-            )
+            # ====================================
+            #               SEVERITY
+            # ====================================
+            severity = self.args.severity_dist.sample()
+            is_trauma = self.args.p_trauma_dist.sample()
 
-            # sample if the patient is trauma or non-trauma
-            trauma = self.args.p_trauma_dist.sample()
 
-            if trauma:
-                # create and store a trauma patient to update KPIs.
-                new_patient = TraumaPathway(patient_count, self.env, self.args, self, self.full_event_log)
+            if is_trauma and severity > 2:
+                severity = random.choice([1, 2])
+            elif not is_trauma and severity < 3:
+                severity = random.choice([3, 4, 5])
+
+
+            if is_trauma:
+                new_patient = TraumaPathway(patient_count, self.env, self.args, self.full_event_log, severity=severity)
                 self.trauma_patients.append(new_patient)
             else:
-                # create and store a non-trauma patient to update KPIs.
-                new_patient = NonTraumaPathway(patient_count, self.env, self.args, self, self.full_event_log)
+                new_patient = NonTraumaPathway(patient_count, self.env, self.args, self.full_event_log, severity=severity)
                 self.non_trauma_patients.append(new_patient)
 
-            # start the pathway process for the patient
+            # Activate the patient’s pathway
             self.env.process(new_patient.execute())
 
-    def get_average_wait_time(self):
-        total_wait_time = 0
-        total_patients = 0
-
-        all_patients = self.trauma_patients + self.non_trauma_patients
 
 
-        for patient in all_patients:
-            total_wait_time += max(0, patient.wait_treat)  # No need for hasattr check anymore
+    def get_overall_weighted_wait_time(self):
+        """Returns a weighted average of wait times across stages."""
+        weights = {
+            "wait_triage": 0.4,
+            "wait_reg": 0.2,
+            "wait_exam": 0.2,
+            "wait_treat": 0.2
+        }
 
-            #print(total_wait_time)
-            total_patients += 1
+        total_weighted = 0.0
+        count = 0
+        for patient in self.trauma_patients + self.non_trauma_patients:
+            for key, weight in weights.items():
+                if hasattr(patient, key):
+                    val = getattr(patient, key)
+                    if val is not None:
+                        total_weighted += val * weight
+                        count += weight
 
-        if total_patients > 0:
-            return total_wait_time / total_patients
-        else:
-            return 0
+        return total_weighted / count if count > 0 else 0.0
 
 
 
@@ -2195,7 +2258,6 @@ class SimplePathway(object):
         # record the waiting time for registration
         self.wait_treat = self.env.now - waiting_time_start
 
-        self.total_waiting_time += max(0, self.wait_treat)
 
 
 
@@ -2230,8 +2292,7 @@ class SimplePathway(object):
         # Resource is no longer in use, so put it back in
         self.args.treatment.put(treatment_resource) 
 
-        # total time in system
-        self.total_patients_served += 1 # Discharged
+
 
         self.total_time = self.env.now - self.arrival
         self.full_event_log.append(
@@ -2476,9 +2537,7 @@ class SimpleBranchedPathway(object):
         # record the waiting time for registration
         self.wait_exam = self.env.now - self.arrival_exam
 
-        self.total_waiting_time += max(0, self.wait_exam)
-        self.model.hospitalenv.wait_time_totals["exam"] += max(0, self.wait_exam)
-        self.model.hospitalenv.wait_time_counts["exam"] += 1
+
 
 
         trace(f'treatment of patient {self.identifier} begins '
@@ -2547,9 +2606,6 @@ class SimpleBranchedPathway(object):
             # record the waiting time for treatment
             self.wait_treat = waiting_time_start
 
-            self.total_waiting_time += max(0, self.wait_treat)
-            self.model.hospitalenv.wait_time_totals["cubicle_1"] += max(0, self.wait_treat)
-            self.model.hospitalenv.wait_time_counts["cubicle_1"] += 1
 
             trace(f'treatment of patient {self.identifier} begins '
                     f'{self.env.now:.3f}')
@@ -2583,7 +2639,6 @@ class SimpleBranchedPathway(object):
             non_trauma_treatment_resource.busy = False
             self.args.treatment.put(non_trauma_treatment_resource)
             
-            self.total_patients_served += 1
             self.full_event_log.append(
                 {'patient': self.identifier,
                 'pathway': 'simple_with_branch',
@@ -2601,7 +2656,6 @@ class SimpleBranchedPathway(object):
                  'time': self.env.now}
             )
 
-            self.total_patients_served += 1
             self.full_event_log.append(
                 {'patient': self.identifier,
                 'pathway': 'simple_with_branch',

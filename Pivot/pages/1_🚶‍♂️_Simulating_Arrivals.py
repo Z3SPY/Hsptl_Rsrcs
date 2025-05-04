@@ -242,7 +242,7 @@ with tab1:
                     # divide the number of arrivals by 24 to get arrivals per hour,
                     # then divide 60 by this value to get the number of minutes
                     manual_arrival_rate=60/(mean_arrivals_per_day/24),
-                    override_arrival_rate=True)
+                    override_arrival_rate=False)
 
     # A user must press a streamlit button to run the model
     button_run_pressed = st.button("Run simulation")

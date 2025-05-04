@@ -359,17 +359,6 @@ class HospitalSimEnv(gym.Env):
         for unit, fatigue in avg_fatigue.items():
             print(f"  {unit}: {fatigue:.1f}")
 
-        # Wait Times
-        print("\n=== Wait Time Statistics ===")
-        avg_wait_times = {}
-        for unit in self.wait_time_totals.keys():
-            total = self.wait_time_totals[unit]
-            count = self.wait_time_counts[unit]
-            avg_wait = (total / count) if count > 0 else 0.0
-            avg_wait_times[unit] = avg_wait
-        print("Average Wait Times by Unit (minutes):")
-        for unit, wait in avg_wait_times.items():
-            print(f"  {unit}: {wait:.1f}")
 
         # Active and Resting Staff Counts
         print("\n=== Staffing Summary ===")
@@ -451,7 +440,7 @@ class HospitalSimEnv(gym.Env):
 
             # run results
             summary = SimulationSummary(self.model)
-            summary.process_run_results_live()
+            summary.process_run_results_live() # Tire
 
             # Now you can access mid-shift wait times, etc:
             mean_triage_wait = summary.results.get('01a_triage_wait', 0.0)
@@ -570,7 +559,8 @@ class HospitalSimEnv(gym.Env):
         new_events = [e for e in self.model.full_event_log if t0 < e['time'] <= t1]
 
         discharges = sum(1 for e in new_events if e['event'] == 'depart')
-        avg_wait = self.model.get_average_wait_time()
+        avg_wait = self.model.get_overall_weighted_wait_time()
+
 
         idle_resources = sum(len(getattr(self.model.args, res).items) for res in self.resource_targets)
         
@@ -597,7 +587,8 @@ class HospitalSimEnv(gym.Env):
         """Compute reward at the end of a shift."""
         discharges = self._count_shift_discharges()
 
-        avg_wait = self.model.get_average_wait_time()
+        avg_wait = self.model.get_overall_weighted_wait_time()
+
 
         total_fatigue = 0.0
         active_count = 0
