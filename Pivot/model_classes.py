@@ -336,15 +336,17 @@ class Scenario:
         # LOS Sampling
         # =================================
         self.unit_transition_probs = {
-            1: [0.9, 0.1, 0.0],
-            2: [0.6, 0.3, 0.1],
-            3: [0.4, 0.4, 0.2],
-            4: [0.2, 0.5, 0.3],
-            5: [0.1, 0.4, 0.5],
+            1: [0.25, 0.40, 0.35],
+            2: [0.15, 0.45, 0.40],
+            3: [0.12, 0.40, 0.48],
+            4: [0.10, 0.38, 0.52],
+            5: [0.08, 0.30, 0.62],
         }
+
         self.discharge_los = {i: 0.1 for i in range(1, 6)}
-        self.ward_los = {1: 1.5, 2: 2.5, 3: 3.5, 4: 5.0, 5: 6.0}
-        self.icu_los = {1: 2.5, 2: 3.5, 3: 5.0, 4: 7.0, 5: 10.0}
+        self.icu_los = {sev: np.random.uniform(2880, 4320) for sev in range(1, 6)}
+        self.ward_los = {sev: np.random.uniform(1440, 2880) for sev in range(1, 6)}
+
         # =================================     
         
         
@@ -393,13 +395,13 @@ class Scenario:
         # Triage duration
         self.triage_dist = Exponential(self.triage_mean,
                                        random_seed=self.seeds[0])
-
+    
         # Registration duration (non-trauma only)
         self.reg_dist = Lognormal(self.reg_mean,
                                   np.sqrt(self.reg_var),
                                   random_seed=self.seeds[1])
 
-        # Evaluation (non-trauma only)
+        # Examination duration (non-trauma only)
         self.exam_dist = Normal(self.exam_mean,
                                 np.sqrt(self.exam_var),
                                 random_seed=self.seeds[2])
@@ -418,6 +420,10 @@ class Scenario:
                                     np.sqrt(self.non_trauma_treat_var),
                                     random_seed=self.seeds[5])
 
+
+        # =================================
+        # Service Type Distributions
+        # =================================
         # probability of non-trauma patient requiring treatment
         self.nt_p_treat_dist = Bernoulli(self.non_trauma_treat_p,
                                          random_seed=self.seeds[6])
@@ -456,6 +462,38 @@ class Scenario:
                                         random_seed=self.seeds[9])
 
 
+# ========================================
+#   PATIENT HELPER FUNCTION
+# ========================================
+def request_resource(self, resource_type):
+    """Helper method to request a resource and log the event"""
+    resource = yield getattr(self.args, resource_type).get()
+    resource.busy = True
+    self.log_event('resource_use', f'{resource_type}_begins', resource.id_attribute)
+    return resource
+
+def release_resource(self, resource, resource_type):
+    """Helper method to release a resource and log the event"""
+    resource.busy = False
+    getattr(self.args, resource_type).put(resource)
+    self.log_event('resource_use_end', f'{resource_type}_complete', resource.id_attribute)
+
+def log_event(self, event_type, event, resource_id=None):
+    """Helper method to log events to `self.full_event_log`"""
+    self.full_event_log.append({
+        'patient': self.identifier,
+        'pathway': self.__class__.__name__,
+        'event_type': event_type,
+        'event': event,
+        'time': self.env.now,
+        'resource_id': resource_id
+    })
+
+    
+
+# ========================================
+            
+            
 # ## Patient Pathways Process Logic
 
 
@@ -504,6 +542,13 @@ class TraumaPathway:
         self.trauma_duration = -np.inf
         self.treat_duration = -np.inf
 
+
+        # Add these lines to track ward/ICU wait and LOS
+        self.wait_ward = -np.inf
+        self.ward_duration = -np.inf
+        self.wait_icu = -np.inf
+        self.icu_duration = -np.inf
+
         self.severity = severity or self.args.severity_dist.sample()
 
 
@@ -517,7 +562,12 @@ class TraumaPathway:
         2. trauma
         3. treatment
         '''
-        # record the time of arrival and entered the triage queue
+
+
+        # ================================================
+        # QUEUE STARTS (Initial)
+        # ================================================
+
         self.arrival = self.env.now
         self.full_event_log.append(
             {'patient': self.identifier,
@@ -527,15 +577,17 @@ class TraumaPathway:
              'time': self.env.now}
         )
 
-        ###################################################
-        # request sign-in/triage
-        waiting_time_start = self.env.now
 
+        # ================================================
+        # TRIAGE STARTS
+        # ================================================
+
+        waiting_time_start = self.env.now
         triage_resource = yield self.args.triage.get()
         triage_resource.busy = True
 
 
-        # record the waiting time for triage
+
         self.wait_triage = self.env.now - waiting_time_start
 
 
@@ -571,7 +623,10 @@ class TraumaPathway:
         triage_resource.busy = False
         self.args.triage.put(triage_resource) 
         
-        ###################################################
+
+        # ================================================
+        # QUEUE STARTS (TRAUMA ROOM)
+        # ================================================
 
         # record the time that entered the trauma queue
         start_wait = self.env.now
@@ -583,11 +638,12 @@ class TraumaPathway:
              'time': self.env.now}
         )
 
-        ###################################################
+        # ================================================
+        # TRAIMA ROOOM
+        # ================================================
+
         # request trauma room
         waiting_time_start = self.env.now
-      
-        
         trauma_resource = yield self.args.trauma.get()
         trauma_resource.busy = True
 
@@ -627,10 +683,11 @@ class TraumaPathway:
         trauma_resource.busy = False
         self.args.trauma.put(trauma_resource)
         
-        #######################################################
+        # ================================================
+        # QUEUE STARTS (TRAUMA TREATMENT)
+        # ================================================
 
         # record the time that entered the treatment queue
-        start_wait = self.env.now
         self.full_event_log.append(
             {'patient': self.identifier,
              'pathway': 'Trauma',
@@ -639,7 +696,13 @@ class TraumaPathway:
              'time': self.env.now}
         )
 
-        ########################################################
+
+
+        # ================================================
+        # TRAUMA TREATMENT
+        # ================================================
+
+
         # request treatment cubicle
         waiting_time_start = self.env.now
 
@@ -678,6 +741,129 @@ class TraumaPathway:
              'resource_id': trauma_treatment_resource.id_attribute}
         )
 
+        # Resource is no longer in use, so put it back in the store
+        trauma_treatment_resource.busy = False
+        self.args.cubicle_2.put(trauma_treatment_resource) 
+
+        # ================================================
+        # SEVERITY LOGIC
+        # ================================================
+
+        # Determine next unit
+        # Assume `self.severity` has been sampled in __init__ or earlier in execute
+
+        if self.severity not in self.args.unit_transition_probs:
+            print(f"[WARNING] Severity {self.severity} not in transitions; defaulting to discharge.")
+            destination = 'discharge'
+        else:
+            probs = self.args.unit_transition_probs[self.severity]
+            destination = random.choices(['icu', 'ward', 'discharge'], weights=probs)[0]
+
+        # Discharge Log
+        
+
+        # ===>
+        # WARD
+        # ===>
+
+        if destination == 'ward':
+            ward_request_time = self.env.now
+
+            self.full_event_log.append({
+                    'patient': self.identifier,
+                    'pathway': 'Trauma',
+                    'event': 'TRAUMA_ward_wait_begins',
+                    'event_type': 'queue',
+                    'time': ward_request_time
+                })
+
+            with self.args.ward_beds.request() as req:
+                yield req
+                self.wait_ward = self.env.now - ward_request_time
+
+                self.full_event_log.append({
+                    'patient': self.identifier,
+                    'event': 'ward_admission',
+                    'event_type': 'resource_use',
+                    'unit': 'ward',
+                    'severity': self.severity,
+                    'time': self.env.now
+                })
+
+                los = self.args.ward_los.get(self.severity, 1800)
+                self.ward_duration = los
+                yield self.env.timeout(self.ward_duration)
+
+                self.full_event_log.append({
+                    'patient': self.identifier,
+                    'event': 'ward_discharge',
+                    'event_type': 'resource_use_end',
+                    'unit': 'ward',
+                    'severity': self.severity,
+                    'time': self.env.now
+                })
+
+        # ===>
+        # ICU
+        # ===>
+
+        elif destination == 'icu':
+            icu_request_time = self.env.now
+
+            self.full_event_log.append({
+                    'patient': self.identifier,
+                    'pathway': 'Trauma',
+                    'event': 'TRAUMA_icu_wait_begins',
+                    'event_type': 'queue',
+                    'time': icu_request_time
+                })
+
+            with self.args.icu_beds.request() as req:
+                yield req
+                self.wait_icu = self.env.now - icu_request_time
+                self.full_event_log.append({
+                    'patient': self.identifier,
+                    'event': 'icu_admission',
+                    'event_type': 'resource_use',
+                    'unit': 'icu',
+                    'severity': self.severity,
+                    'time': self.env.now
+                })
+
+                los = self.args.icu_los.get(self.severity, 3000)
+                self.icu_duration = los
+                yield self.env.timeout(self.icu_duration)
+
+                self.full_event_log.append({
+                    'patient': self.identifier,
+                    'event': 'icu_discharge',
+                    'event_type': 'resource_use_end',
+                    'unit': 'icu',
+                    'severity': self.severity,
+                    'time': self.env.now
+                })
+
+        # ===>
+        # DIRECT DIS
+        # ===>
+
+        else:
+            self.full_event_log.append({
+                'patient': self.identifier,
+                'event': 'direct_discharge',
+                'event_type': 'arrival_departure',
+                'unit': 'discharge',
+                'severity': self.severity,
+                'time': self.env.now
+            })
+
+
+
+
+        #########################################################
+
+
+
         self.full_event_log.append(
             {'patient': self.identifier,
             'pathway': 'Shared',
@@ -686,9 +872,7 @@ class TraumaPathway:
             'time': self.env.now}
         )
 
-        # Resource is no longer in use, so put it back in the store
-        trauma_treatment_resource.busy = False
-        self.args.cubicle_2.put(trauma_treatment_resource) 
+
         
 
         #########################################################
@@ -745,6 +929,13 @@ class NonTraumaPathway(object):
         self.exam_duration = -np.inf
         self.treat_duration = -np.inf
 
+
+        # Add these lines to track ward/ICU wait and LOS
+        self.wait_ward = -np.inf
+        self.ward_duration = -np.inf
+        self.wait_icu = -np.inf
+        self.icu_duration = -np.inf
+
         # Severity
         self.severity = severity or self.args.severity_dist.sample()
 
@@ -761,6 +952,10 @@ class NonTraumaPathway(object):
         4.2 60% treatment then discharge
         '''
 
+        
+        # ================================================
+        # QUEUE STARTS (Initial)
+        # ================================================
 
         # record the time of arrival and entered the triage queue
         self.arrival = self.env.now
@@ -772,11 +967,13 @@ class NonTraumaPathway(object):
              'time': self.env.now}
         )
 
-        ###################################################
+
+        # ================================================
+        # TRIAGE STARTS
+        # ================================================
+
         # request sign-in/triage
         waiting_time_start = self.env.now
-       
-
         triage_resource = yield self.args.triage.get()
 
         # record the waiting time for triage
@@ -812,7 +1009,10 @@ class NonTraumaPathway(object):
 
         # Resource is no longer in use, so put it back in the store 
         self.args.triage.put(triage_resource) 
-        #########################################################
+
+        # ================================================
+        # QUEUE STARTS (REGISTRATION)
+        # ================================================
 
         # record the time that entered the registration queue
         start_wait = self.env.now
@@ -824,7 +1024,10 @@ class NonTraumaPathway(object):
              'time': self.env.now}
         )
 
-        #########################################################
+        # ================================================
+        # REGISTRATION
+        # ================================================
+
         # request registration clerk
         waiting_time_start = self.env.now
 
@@ -869,7 +1072,10 @@ class NonTraumaPathway(object):
         registration_resource.busy = False
         self.args.registration.put(registration_resource)
         
-        ########################################################
+
+        # ================================================
+        # QUEUE STARTS (EXAMINATION)
+        # ================================================
 
         # record the time that entered the evaluation queue
         start_wait = self.env.now
@@ -882,7 +1088,10 @@ class NonTraumaPathway(object):
              'time': self.env.now}
         )
 
-        #########################################################
+        # ================================================
+        # EXAMINATION
+        # ================================================
+
         # request examination resource
         self.arrival_exam = self.env.now
 
@@ -925,7 +1134,12 @@ class NonTraumaPathway(object):
         )
         # Resource is no longer in use, so put it back in
         self.args.exam.put(examination_resource) 
-        ############################################################################
+
+
+        # ================================================
+        # POST-EXAMINATION DECISIONS
+        # ================================================
+
 
         # sample if patient requires treatment?
         self.require_treat = self.args.nt_p_treat_dist.sample()  #pylint: disable=attribute-defined-outside-init
@@ -941,7 +1155,6 @@ class NonTraumaPathway(object):
             )
 
             # record the time that entered the treatment queue
-            start_wait = self.env.now
             self.full_event_log.append(
                 {'patient': self.identifier,
                  'pathway': 'Non-Trauma',
@@ -951,7 +1164,11 @@ class NonTraumaPathway(object):
             )
 
             ###################################################
-            # request treatment cubicle
+ 
+        # ===>
+        # Req Treatment Cubicle
+        # ===>
+
             waiting_time_start = self.env.now
 
             non_trauma_treatment_resource = yield self.args.cubicle_1.get()
@@ -989,53 +1206,121 @@ class NonTraumaPathway(object):
                     'resource_id': non_trauma_treatment_resource.id_attribute}
             )
 
+        # ===>
+        # Release From Cubicle
+        # ===>
+
             # Resource is no longer in use, so put it back in the store
             non_trauma_treatment_resource.busy = False
             self.args.cubicle_1.put(non_trauma_treatment_resource)
             
-        ##########################################################################
-        
-        if self.severity not in self.args.unit_transition_probs:
-            print(f"[WARNING] Severity {self.severity} unexpected — defaulting to discharge.")
-            destination = 'discharge'
-        else:
-            probs = self.args.unit_transition_probs[self.severity]
-            destination = random.choices(['discharge', 'ward', 'icu'], weights=probs)[0]
+            ##########################################################################
 
-        if destination == 'ward':
-            with self.args.ward_beds.request() as req:
-                yield req
-                los = self.args.ward_los.get(self.severity, 8.0)
-                yield self.env.timeout(los)
+            # ============================================================
+            # Post-treatment transition: Decide next destination
+            # ============================================================
+
+            if self.severity not in self.args.unit_transition_probs:
+                print(f"[WARNING] Severity {self.severity} unexpected — defaulting to discharge.")
+                destination = 'discharge'
+            else:
+                probs = self.args.unit_transition_probs[self.severity]
+                destination = random.choices(['icu', 'ward', 'discharge'], weights=probs)[0]
+
+            # Discharge Log
+
+            # =========================
+            # ICU Branch
+            # =========================
+            if destination == 'icu':
+                icu_request_time = self.env.now
+
                 self.full_event_log.append({
                     'patient': self.identifier,
-                    'event': 'ward_discharge',
-                    'unit': 'ward',
-                    'severity': self.severity,
+                    'pathway': 'Non-Trauma',
+                    'event': 'MINORS_icu_wait_begins',
+                    'event_type': 'queue',
                     'time': self.env.now
                 })
 
-        elif destination == 'icu':
-            with self.args.icu_beds.request() as req:
-                yield req
-                los = self.args.icu_los.get(self.severity, 12.0)
-                yield self.env.timeout(los)
+                with self.args.icu_beds.request() as req:
+                    yield req
+
+                    self.wait_icu = self.env.now - icu_request_time
+                    self.full_event_log.append({
+                        'patient': self.identifier,
+                        'pathway': 'Non-Trauma',
+                        'event': 'icu_admit_begins',
+                        'event_type': 'resource_use',
+                        'time': self.env.now,
+                        'resource_id': 'icu_bed'
+                    })
+
+                    los = self.args.icu_los.get(self.severity, 3000.0)  # in minutes
+                    self.icu_duration = los
+                    yield self.env.timeout(self.icu_duration)
+
+                    self.full_event_log.append({
+                        'patient': self.identifier,
+                        'pathway': 'Non-Trauma',
+                        'event': 'icu_discharge',
+                        'event_type': 'resource_use_end',
+                        'time': self.env.now,
+                        'resource_id': 'icu_bed'
+                    })
+
+            # =========================
+            # Ward Branch
+            # =========================
+            elif destination == 'ward':
+                ward_request_time = self.env.now
+
                 self.full_event_log.append({
                     'patient': self.identifier,
-                    'event': 'icu_discharge',
-                    'unit': 'icu',
-                    'severity': self.severity,
+                    'pathway': 'Non-Trauma',
+                    'event': 'MINORS_ward_wait_begins',
+                    'event_type': 'queue',
                     'time': self.env.now
                 })
 
-        else:
-            self.full_event_log.append({
-                'patient': self.identifier,
-                'event': 'direct_discharge',
-                'unit': 'discharge',
-                'severity': self.severity,
-                'time': self.env.now
-            })
+                with self.args.ward_beds.request() as req:
+                    yield req
+                    self.wait_ward = self.env.now - ward_request_time
+
+                    self.full_event_log.append({
+                        'patient': self.identifier,
+                        'pathway': 'Non-Trauma',
+                        'event': 'ward_admit_begins',
+                        'event_type': 'resource_use',
+                        'time': self.env.now,
+                        'resource_id': 'ward_bed'
+                    })
+
+                    los = self.args.ward_los.get(self.severity, 2000.0)  # in minutes
+                    self.ward_duration = los
+                    yield self.env.timeout(self.ward_duration)
+
+                    self.full_event_log.append({
+                        'patient': self.identifier,
+                        'pathway': 'Non-Trauma',
+                        'event': 'ward_discharge',
+                        'event_type': 'resource_use_end',
+                        'time': self.env.now,
+                        'resource_id': 'ward_bed'
+                    })
+
+            # =========================
+            # Direct Discharge
+            # =========================
+            else:
+                
+                self.full_event_log.append(
+                    {'patient': self.identifier,
+                    'pathway': 'Shared',
+                    'event': 'depart',
+                    'event_type': 'arrival_departure',
+                    'time': self.env.now}
+                )
 
 
 
@@ -1057,6 +1342,10 @@ class NonTraumaPathway(object):
         self.total_time = self.env.now - self.arrival
 
 
+# ================================================
+# TREATEMENT CENTER MODEL
+# ================================================
+        
 class TreatmentCentreModel:
     '''
     The treatment centre model
@@ -1093,24 +1382,9 @@ class TreatmentCentreModel:
 
 
     def init_resources(self):
-        '''
-        Init the number of resources
-        and store in the arguments container object
 
-        Resource list:
-        1. Sign-in/triage bays
-        2. registration clerks
-        3. examination bays
-        4. trauma bays
-        5. non-trauma cubicles (1)
-        6. trauma cubicles (2)
-
-        '''
 
         # sign/in triage
-        # self.args.triage = CustomResource(self.env,
-        #                                   capacity=self.args.n_triage)
-        
         self.args.triage = simpy.Store(self.env)
 
         for i in range(self.args.n_triage):
@@ -1122,9 +1396,6 @@ class TreatmentCentreModel:
                 )
 
         # registration
-        # self.args.registration = CustomResource(self.env,
-        #                                         capacity=self.args.n_reg)
-
         self.args.registration = simpy.Store(self.env)
 
         for i in range(self.args.n_reg):
@@ -1136,9 +1407,6 @@ class TreatmentCentreModel:
                 )
 
         # examination
-        # self.args.exam = CustomResource(self.env,
-        #                                 capacity=self.args.n_exam)
-        
         self.args.exam = simpy.Store(self.env)
 
         for i in range(self.args.n_exam):
@@ -1150,9 +1418,6 @@ class TreatmentCentreModel:
                 )
 
         # trauma
-        # self.args.trauma = CustomResource(self.env,
-        #                                   capacity=self.args.n_trauma)
-        
         self.args.trauma = simpy.Store(self.env)
 
         for i in range(self.args.n_trauma):
@@ -1164,9 +1429,6 @@ class TreatmentCentreModel:
                 )
 
         # non-trauma treatment
-        # self.args.cubicle_1 = CustomResource(self.env,
-        #                                      capacity=self.args.n_cubicles_1)
-        
         self.args.cubicle_1 = simpy.Store(self.env)
 
         for i in range(self.args.n_cubicles_1):
@@ -1178,9 +1440,6 @@ class TreatmentCentreModel:
                 )
 
         # trauma treatment
-        # self.args.cubicle_2 = CustomResource(self.env,
-        #                                      capacity=self.args.n_cubicles_2)
-        
         self.args.cubicle_2 = simpy.Store(self.env)
 
         for i in range(self.args.n_cubicles_2):
@@ -1191,13 +1450,17 @@ class TreatmentCentreModel:
                     id_attribute = i+1)
                 )
 
-        # Beds 
-        self.ward_beds = simpy.Resource(self.env, capacity=10)
-        self.icu_beds = simpy.Resource(self.env, capacity=5)
 
-        # Inject back into args so patients can access it
-        self.args.ward_beds = self.ward_beds
-        self.args.icu_beds = self.icu_beds
+
+        # ==========================================
+        # ICU and ward beds
+        # ==========================================
+            
+
+
+        self.args.ward_beds = simpy.Resource(self.env, capacity=self.args.n_ward_beds)
+        self.args.icu_beds = simpy.Resource(self.env, capacity=self.args.n_icu_beds)
+
 
 
     def run(self, results_collection_period=DEFAULT_RESULTS_COLLECTION_PERIOD):
@@ -1375,30 +1638,186 @@ class TreatmentCentreModel:
         return total_weighted / count if count > 0 else 0.0
 
 
-
+import numpy as np
+import pandas as pd
 
 class SimulationSummary:
-    '''
-    End of run result processing logic of the simulation model
-    '''
-
     def __init__(self, model):
-        '''
-        Constructor
-
-        Params:
-        ------
-        model: TraumaCentreModel
-            The model.
-        '''
         self.model = model
         self.args = model.args
-        self.results = None
-        self.patient_log = None
-        self.full_event_log = model.full_event_log
+        self.log = model.full_event_log
         self.utilisation_audit = model.utilisation_audit
 
+        # New RL metrics
+        self.utilization = {}
+        self.queue_lengths = {}
+        self.avg_total_wait_time = 0.0
+        self.avg_fatigue = 0.0
+        self.total_discharged = 0
+        self.plan_to_load_error = 0.0
 
+        # Old evaluation-compatible
+        self.patient_log = None
+        self.results = {}
+
+        self._compute_bottleneck_metrics()
+
+    def _compute_bottleneck_metrics(self):
+        units = ['triage', 'registration', 'exam', 'trauma',
+                 'cubicle_1', 'cubicle_2', 'ward', 'icu']
+        usage = {u: 0 for u in units}
+        queue = {u: 0 for u in units}
+        total_wait = 0
+        wait_count = 0
+        fatigue_samples = []
+
+        for e in self.log:
+            etype = e.get("event_type", "")
+            ename = e.get("event", "").lower()
+
+            if etype == "resource_use":
+                u = self._infer_unit(ename)
+                if u in usage:
+                    usage[u] += 1
+
+            elif etype == "queue":
+                u = self._infer_unit(ename)
+                if u in queue:
+                    queue[u] += 1
+
+            elif etype == "resource_use_end" and "wait_time" in e:
+                total_wait += e["wait_time"]
+                wait_count += 1
+
+            elif etype == "fatigue_sample" and "fatigue" in e:
+                fatigue_samples.append(e["fatigue"])
+
+            elif ename in ["ward_discharge", "icu_discharge", "direct_discharge"]:
+                self.total_discharged += 1
+
+        for u in units:
+            cap = getattr(self.args, f"n_{u}", 1)
+            self.utilization[u] = usage[u] / cap if cap > 0 else 0.0
+            self.queue_lengths[u] = queue[u]
+
+        self.avg_total_wait_time = total_wait / wait_count if wait_count else 0.0
+        self.avg_fatigue = np.mean(fatigue_samples) if fatigue_samples else 0.0
+
+    def _infer_unit(self, event_name):
+        mapping = {
+            "triage": "triage",
+            "registration": "registration",
+            "exam": "exam",
+            "trauma": "trauma",
+            "minors_treatment": "cubicle_1",
+            "trauma_treatment": "cubicle_2",
+            "ward": "ward",
+            "icu": "icu",
+        }
+        for key, val in mapping.items():
+            if key in event_name:
+                return val
+        return "unknown"
+
+    # ========== Original Analysis Functions ==========
+    def get_mean_metric(self, metric, patients):
+        vals = [getattr(p, metric) for p in patients if getattr(p, metric) > -np.inf]
+        return np.mean(vals) if vals else 0.0
+
+    def get_perc_wait_target_met(self, metric, patients, target):
+        valid = [getattr(p, metric) for p in patients if getattr(p, metric) > -np.inf]
+        met = [v for v in valid if v < target]
+        return len(met) / len(valid) if valid else 0.0
+
+    def get_resource_util(self, metric, n_resources, patients):
+        total = sum([getattr(p, metric) for p in patients if getattr(p, metric) > -np.inf])
+        return total / (self.model.rc_period * n_resources) if n_resources > 0 else 0.0
+
+    def get_throughput(self, patients):
+        return len([p for p in patients if p.total_time > -np.inf])
+
+    def process_run_results(self):
+        if self.args.model == "simplest":
+            pts = self.model.patients
+            self.patient_log = pts
+            self.results = {
+                "00_arrivals": len(pts),
+                "01a_treatment_wait": self.get_mean_metric("wait_treat", pts),
+                "01b_treatment_util": self.get_resource_util("treat_duration", self.args.n_cubicles_1, pts),
+                "01c_treatment_wait_target_met": self.get_perc_wait_target_met("wait_treat", pts, 120),
+                "08_total_time": self.get_mean_metric("total_time", pts),
+                "09_throughput": self.get_throughput(pts),
+            }
+
+        elif self.args.model == "simple_with_branch":
+            pts = self.model.patients
+            self.patient_log = pts
+            self.results = {
+                "00_arrivals": len(pts),
+                "01a_examination_wait": self.get_mean_metric("wait_exam", pts),
+                "01b_examination_util": self.get_resource_util("exam_duration", self.args.n_exam, pts),
+                "01c_examination_wait_target_met": self.get_perc_wait_target_met("wait_exam", pts, 120),
+                "02a_treatment_wait": self.get_mean_metric("wait_treat", pts),
+                "02b_treatment_util": self.get_resource_util("treat_duration", self.args.n_cubicles_1, pts),
+                "08_total_time": self.get_mean_metric("total_time", pts),
+                "09_throughput": self.get_throughput(pts),
+            }
+
+        else:
+            non_trauma = self.model.non_trauma_patients
+            trauma = self.model.trauma_patients
+            all_pts = non_trauma + trauma
+            self.patient_log = all_pts
+            self.results = {
+                "00_arrivals": len(all_pts),
+                "01a_triage_wait": self.get_mean_metric("wait_triage", all_pts),
+                "01b_triage_util": self.get_resource_util("triage_duration", self.args.n_triage, all_pts),
+                "02a_registration_wait": self.get_mean_metric("wait_reg", non_trauma),
+                "02b_registration_util": self.get_resource_util("reg_duration", self.args.n_reg, non_trauma),
+                "03a_examination_wait": self.get_mean_metric("wait_exam", non_trauma),
+                "03b_examination_util": self.get_resource_util("exam_duration", self.args.n_exam, non_trauma),
+                "04a_treatment_wait(non_trauma)": self.get_mean_metric("wait_treat", non_trauma),
+                "04b_treatment_util(non_trauma)": self.get_resource_util("treat_duration", self.args.n_cubicles_1, non_trauma),
+                "05_total_time(non-trauma)": self.get_mean_metric("total_time", non_trauma),
+                "06a_trauma_wait": self.get_mean_metric("wait_trauma", trauma),
+                "06b_trauma_util": self.get_resource_util("trauma_duration", self.args.n_trauma, trauma),
+                "07a_treatment_wait(trauma)": self.get_mean_metric("wait_treat", trauma),
+                "07b_treatment_util(trauma)": self.get_resource_util("treat_duration", self.args.n_cubicles_2, trauma),
+                "08_total_time(trauma)": self.get_mean_metric("total_time", trauma),
+                "09_throughput": self.get_throughput(all_pts),
+                "10a_ward_wait": self.get_mean_metric("wait_ward", all_pts),
+                "10b_ward_LOS": self.get_mean_metric("ward_duration", all_pts),
+                "11a_icu_wait": self.get_mean_metric("wait_icu", all_pts),
+                "11b_icu_LOS": self.get_mean_metric("icu_duration", all_pts),
+            }
+
+    def summary_frame(self):
+        return pd.DataFrame([{
+            "avg_total_wait_time": self.avg_total_wait_time,
+            "avg_fatigue": self.avg_fatigue,
+            "total_discharged": self.total_discharged,
+            "plan_to_load_error": self.plan_to_load_error,
+            **{f'util_{k}': v for k, v in self.utilization.items()},
+            **{f'q_{k}': v for k, v in self.queue_lengths.items()},
+            **self.results
+        }])
+
+    def detailed_logs(self):
+        return {
+            "patient": self.patient_log,
+            "event_log": self.log,
+            "utilisation_audit": self.utilisation_audit,
+            "results_summary": self.results,
+            "bottleneck_summary": {
+                "utilization": self.utilization,
+                "queue_lengths": self.queue_lengths,
+                "avg_wait": self.avg_total_wait_time,
+                "avg_fatigue": self.avg_fatigue,
+                "discharged": self.total_discharged,
+                "plan_error": self.plan_to_load_error
+            }
+        }
+    
     def process_run_results_live(self, patients=None):
         '''
         Calculates run statistics. Can work at end of run or midway if patients are provided.
@@ -1419,6 +1838,13 @@ class SimulationSummary:
         # Save for logging
         self.patient_log = patients
 
+        # Acuity Distribution Logic
+        acuity_counts = {i: 0 for i in range(1, 6)}  # 1 - 5 severity levels
+        for p in patients:
+            acuity_counts[p.severity] += 1
+        print(f"[Acuity Distribution] {acuity_counts}")  # This will print the distribution in the console.
+
+
         # Now the SAME logic as before based on model type
         if self.args.model == "simplest":
             mean_treat_wait = self.get_mean_metric('wait_treat', patients)
@@ -1432,7 +1858,8 @@ class SimulationSummary:
                 '01b_treatment_util': treat_util,
                 '01c_treatment_wait_target_met': perc_treat_wait_target_met,
                 '08_total_time': mean_total,
-                '09_throughput': self.get_throughput(patients)
+                '09_throughput': self.get_throughput(patients),
+                '10_acuity_distribution': acuity_counts,  # Add acuity distribution here
             }
 
         elif self.args.model == "simple_with_branch":
@@ -1454,7 +1881,7 @@ class SimulationSummary:
                 '09_throughput': self.get_throughput(patients)
             }
         else:
-            # Full model
+            # Full model (trauma and non-trauma)
             non_trauma_patients = self.model.non_trauma_patients
             trauma_patients = self.model.trauma_patients
 
@@ -1474,299 +1901,15 @@ class SimulationSummary:
                 '07a_treatment_wait(trauma)': self.get_mean_metric('wait_treat', trauma_patients),
                 '07b_treatment_util(trauma)': self.get_resource_util('treat_duration', self.args.n_cubicles_2, trauma_patients),
                 '08_total_time(trauma)': self.get_mean_metric('total_time', trauma_patients),
-                '09_throughput': self.get_throughput(patients)
+                '09_throughput': self.get_throughput(patients),
+                '10_acuity_distribution': acuity_counts,  # Add acuity distribution here
+                '10a_ward_wait': self.get_mean_metric('wait_ward', patients),
+                '10b_ward_util': self.get_resource_util('ward_duration', self.args.n_ward_beds, patients),
+                '11a_icu_wait': self.get_mean_metric('wait_icu', patients),
+                '11b_icu_util': self.get_resource_util('icu_duration', self.args.n_icu_beds, patients),
             }
 
 
-    def process_run_results(self):
-        '''
-        Calculates statistics at end of run.
-        '''
-        self.results = {}
-
-        if self.args.model == "simplest":
-
-
-            self.patient_log = self.model.patients
-
-            mean_treat_wait = self.get_mean_metric('wait_treat', self.model.patients)
-
-            perc_treat_wait_target_met = self.get_perc_wait_target_met('wait_treat',
-                                                                       self.model.patients,
-                                                                       target=120)
-
-            # triage utilisation (both types of patient)
-            treat_util = self.get_resource_util('treat_duration',
-                                                self.args.n_cubicles_1,
-                                                self.model.patients)
-
-            mean_total = self.get_mean_metric('total_time', self.model.patients)
-
-            self.results = {'00_arrivals': len(self.model.patients),
-                            '01a_treatment_wait': mean_treat_wait,
-                            '01b_treatment_util': treat_util,
-                            '01c_treatment_wait_target_met': perc_treat_wait_target_met,
-                            '08_total_time': mean_total,
-                            '09_throughput': self.get_throughput(self.model.patients)
-                            }
-            
-        elif self.args.model == "simple_with_branch":
-
-            self.patient_log = self.model.patients
-
-            # mean waiting time for examination (non_trauma)
-            mean_wait_exam = self.get_mean_metric('wait_exam',
-                                                self.model.patients)
-
-            # examination utilisation (non-trauma)
-            exam_util = self.get_resource_util('exam_duration',
-                                            self.args.n_exam,
-                                            self.model.patients)
-
-            mean_treat_wait = self.get_mean_metric('wait_treat', self.model.patients)
-
-            perc_wait_exam_target_met = self.get_perc_wait_target_met('wait_exam',
-                                                            self.model.patients,
-                                                            target=120)
-
-            # triage utilisation (both types of patient)
-            treat_util = self.get_resource_util('treat_duration',
-                                                self.args.n_cubicles_1,
-                                                self.model.patients)
-
-            mean_total = self.get_mean_metric('total_time', self.model.patients)
-
-            self.results = {'00_arrivals': len(self.model.patients),
-                            '01a_examination_wait': mean_wait_exam,
-                            '01b_examination_util': exam_util,
-                            '01c_examination_wait_target_met': perc_wait_exam_target_met,
-                            '02a_treatment_wait': mean_treat_wait,
-                            '02b_treatment_util': treat_util,
-                            '08_total_time': mean_total,
-                            '09_throughput': self.get_throughput(self.model.patients)
-                            }
-                            
-
-        else:
-        # list of all patients
-            patients = self.model.non_trauma_patients + self.model.trauma_patients
-
-            # mean triage times (both types of patient)
-            mean_triage_wait = self.get_mean_metric('wait_triage', patients)
-
-            # triage utilisation (both types of patient)
-            triage_util = self.get_resource_util('triage_duration',
-                                                self.args.n_triage,
-                                                patients)
-
-            # mean waiting time for registration (non_trauma)
-            mean_reg_wait = self.get_mean_metric('wait_reg',
-                                                self.model.non_trauma_patients)
-
-            # registration utilisation (trauma)
-            reg_util = self.get_resource_util('reg_duration',
-                                            self.args.n_reg,
-                                            self.model.non_trauma_patients)
-
-            # mean waiting time for examination (non_trauma)
-            mean_wait_exam = self.get_mean_metric('wait_exam',
-                                                self.model.non_trauma_patients)
-
-            # examination utilisation (non-trauma)
-            exam_util = self.get_resource_util('exam_duration',
-                                            self.args.n_exam,
-                                            self.model.non_trauma_patients)
-
-            # mean waiting time for treatment (non-trauma)
-            mean_treat_wait = self.get_mean_metric('wait_treat',
-                                                self.model.non_trauma_patients)
-
-            # treatment utilisation (non_trauma)
-            treat_util1 = self.get_resource_util('treat_duration',
-                                                self.args.n_cubicles_1,
-                                                self.model.non_trauma_patients)
-
-            # mean total time (non_trauma)
-            mean_total = self.get_mean_metric('total_time',
-                                            self.model.non_trauma_patients)
-
-            # mean waiting time for trauma
-            mean_trauma_wait = self.get_mean_metric('wait_trauma',
-                                                    self.model.trauma_patients)
-
-            # trauma utilisation (trauma)
-            trauma_util = self.get_resource_util('trauma_duration',
-                                                self.args.n_trauma,
-                                                self.model.trauma_patients)
-
-            # mean waiting time for treatment (rauma)
-            mean_treat_wait2 = self.get_mean_metric('wait_treat',
-                                                    self.model.trauma_patients)
-
-            # treatment utilisation (trauma)
-            treat_util2 = self.get_resource_util('treat_duration',
-                                                self.args.n_cubicles_2,
-                                                self.model.trauma_patients)
-
-            # mean total time (trauma)
-            mean_total2 = self.get_mean_metric('total_time',
-                                            self.model.trauma_patients)
-
-            self.patient_log = patients
-
-            self.results = {'00_arrivals': len(patients),
-                            '01a_triage_wait': mean_triage_wait,
-                            '01b_triage_util': triage_util,
-                            '02a_registration_wait': mean_reg_wait,
-                            '02b_registration_util': reg_util,
-                            '03a_examination_wait': mean_wait_exam,
-                            '03b_examination_util': exam_util,
-                            '04a_treatment_wait(non_trauma)': mean_treat_wait,
-                            '04b_treatment_util(non_trauma)': treat_util1,
-                            '05_total_time(non-trauma)': mean_total,
-                            '06a_trauma_wait': mean_trauma_wait,
-                            '06b_trauma_util': trauma_util,
-                            '07a_treatment_wait(trauma)': mean_treat_wait2,
-                            '07b_treatment_util(trauma)': treat_util2,
-                            '08_total_time(trauma)': mean_total2,
-                            '09_throughput': self.get_throughput(patients)
-                            }
-
-    def get_mean_metric(self, metric, patients):
-        '''
-        Calculate mean of the performance measure for the
-        select cohort of patients,
-
-        Only calculates metrics for patients where it has been 
-        measured.
-
-        Params:
-        -------
-        metric: str
-            The name of the metric e.g. 'wait_treat'
-
-        patients: list
-            A list of patients
-        '''
-        mean = np.array([getattr(p, metric) for p in patients
-                         if getattr(p, metric) > -np.inf]).mean()
-        return mean
-    
-    def get_perc_wait_target_met(self, metric, patients, target):
-        '''
-        Calculate the percentage of patients where a target was met for 
-        the select cohort of patients,
-
-        Only calculates metrics for patients where it has been 
-        measured.
-
-        Params:
-        -------
-        metric: str
-            The name of the metric e.g. 'wait_treat'
-
-        patients: list
-            A list of patients
-        '''
-        met = len(np.array([getattr(p, metric) for p in patients
-                         if getattr(p, metric) < target]))
-        total = len(np.array([getattr(p, metric) for p in patients
-                         if getattr(p, metric) > -np.inf]))
-        return met/total
-
-    def get_resource_util(self, metric, n_resources, patients):
-        '''
-        Calculate proportion of the results collection period
-        where a resource was in use.
-
-        Done by tracking the duration by patient.
-
-        Only calculates metrics for patients where it has been 
-        measured.
-
-        Params:
-        -------
-        metric: str
-            The name of the metric e.g. 'treatment_duration'
-
-        patients: list
-            A list of patients
-        '''
-        total = np.array([getattr(p, metric) for p in patients
-                         if getattr(p, metric) > -np.inf]).sum()
-
-        return total / (self.model.rc_period * n_resources)
-
-    def get_throughput(self, patients):
-        '''
-        Returns the total number of patients that have successfully
-        been processed and discharged in the treatment centre
-        (they have a total time record)
-
-        Params:
-        -------
-        patients: list
-            list of all patient objects simulated.
-
-        Returns:
-        ------
-        float
-        '''
-        return len([p for p in patients if p.total_time > -np.inf])
-
-    def summary_frame(self):
-        '''
-        Returns run results as a pandas.DataFrame
-
-        Returns:
-        -------
-        pd.DataFrame
-        '''
-        # append to results df
-        if self.results is None:
-            self.process_run_results()
-
-        df = pd.DataFrame({'1': self.results})
-        df = df.T
-        df.index.name = 'rep'
-        return df
-
-    def detailed_logs(self):
-        '''
-        Returns run results as a pandas.DataFrame
-
-        Returns:
-        -------
-        pd.DataFrame
-        '''
-        # append to results df
-        if self.full_event_log is None:
-            self.process_run_results()
-
-        if self.utilisation_audit is None:
-            self.process_run_results()
-
-        return {
-            'patient': self.patient_log,
-            'event_log': self.full_event_log,
-            'utilisation_audit': self.utilisation_audit,
-            'results_summary': self.results
-        }
-
-    # def get_full_event_log(self):
-    #     '''
-    #     Returns run results as a pandas.DataFrame
-
-    #     Returns:
-    #     -------
-    #     pd.DataFrame
-    #     '''
-    #     # append to results df
-
-    #     df = pd.DataFrame(self.full_event_log)
-    #     #df = df.T
-    #     #df.index.name = 'rep'
-    #     return df
 
 
 # ## Executing a model

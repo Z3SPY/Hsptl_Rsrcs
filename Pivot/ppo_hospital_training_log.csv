@@ -1,0 +1,1 @@
+timesteps,sim_time_minutes,avg_reward,avg_triage_wait,avg_registration_wait,avg_exam_wait,avg_trauma_wait,avg_non_trauma_treat_wait,avg_trauma_treat_wait,avg_fatigue,avg_throughput

@@ -33,7 +33,7 @@ class HospitalSimEnv(gym.Env):
         self.cur_reward = 0
 
         # Resource definitions
-        self.resource_targets = ['triage', 'registration', 'exam', 'trauma', 'cubicle_1', 'cubicle_2']
+        self.resource_targets = ['triage', 'registration', 'exam', 'trauma', 'cubicle_1', 'cubicle_2', 'icu_beds', 'ward_beds']
         self.cost_per_unit = {
             'triage': 1.0,
             'registration': 0.7,
@@ -66,7 +66,9 @@ class HospitalSimEnv(gym.Env):
             'exam': 10,
             'trauma': 10,
             'cubicle_1': 17,
-            'cubicle_2': 17
+            'cubicle_2': 17,
+            'ward_beds': 30,
+            'icu_beds': 15
         }
         self.active_staff = {k: 0 for k in self.total_staff_pool.keys()}
         self.resting_staff = {k: self.total_staff_pool[k] for k in self.total_staff_pool.keys()}
@@ -86,7 +88,7 @@ class HospitalSimEnv(gym.Env):
             self.action_mapping[idx] = ('remove', res); idx += 1
 
         # Observation space
-        obs_dim = 1 + 2 * len(self.resource_targets) + 2 + len(self.resource_targets)
+        obs_dim = 3 + 2 * len(self.resource_targets) + len(self.resource_targets)
         high = np.array([rc_period] + [500]*(obs_dim-1), dtype=np.float32)
         self.observation_space = spaces.Box(low=0, high=high, dtype=np.float32)
 
@@ -124,6 +126,8 @@ class HospitalSimEnv(gym.Env):
         # Create new scenario
         self.scenario = Scenario(**cfg)
         self.model = TreatmentCentreModel(self.scenario)
+        self.model.sim_summary = SimulationSummary(self.model)
+
         self.model.hospitalenv = self  
         self.model.rc_period = self.rc_period
 
@@ -136,7 +140,12 @@ class HospitalSimEnv(gym.Env):
 
         self.current_time = 0.0
 
-        self.latest_mso_plan = self.mso_shift_planner()  # Generate MSO plan for first shift
+        raw_plan = self.mso_shift_planner()  # integer plan from MSO
+        pool = np.array([4, 4, 5, 4, 5, 4, 30, 30])      # Max capacity per unit (match your staff pool definition)
+        self.latest_mso_plan = raw_plan / pool  # Normalize plan to [0,1]
+
+        print("[DEBUG] latest_mso_plan:", self.latest_mso_plan)
+        print("[DEBUG] Plan length:", len(self.latest_mso_plan))
 
         return self._get_observation()
     
@@ -448,6 +457,8 @@ class HospitalSimEnv(gym.Env):
             mean_treat_wait_nontrauma = summary.results.get('04a_treatment_wait(non_trauma)', 0.0)
             mean_treat_wait_trauma = summary.results.get('07a_treatment_wait(trauma)', 0.0)
             throughput = summary.results.get('09_throughput', 0.0)
+            mean_ward_wait = summary.results.get('10a_ward_wait', 0.0)
+            mean_icu_wait = summary.results.get('11a_icu_wait', 0.0)
 
             # You can now also PRINT or USE these for your reward shaping!
             print(f"[Summary] Mean Triage Wait: {mean_triage_wait:.2f} mins")
@@ -455,6 +466,8 @@ class HospitalSimEnv(gym.Env):
             print(f"[Summary] Mean Non-Trauma Treat Wait: {mean_treat_wait_nontrauma:.2f} mins")
             print(f"[Summary] Mean Trauma Treat Wait: {mean_treat_wait_trauma:.2f} mins")
             print(f"[Summary] Throughput: {throughput:.2f}")
+            print(f"[Summary] Ward Wait: {mean_ward_wait:.2f}")
+            print(f"[Summary] ICU Wait: {mean_icu_wait:.2f}")
 
             self.cumulative_triage_waits.append(summary.results.get('01a_triage_wait', 0.0))
             self.cumulative_registration_waits.append(summary.results.get('02a_registration_wait', 0.0))
@@ -502,40 +515,47 @@ class HospitalSimEnv(gym.Env):
     # -----------------------------
     # RETURNS
     # -----------------------------
-
     def _get_observation(self):
-        """Construct observation vector."""
-        obs = [self.current_time]
-        log = self.model.full_event_log
+        """
+        Clean bottleneck-aware observation function for learnability and MSO integration.
+        """
+        summary = self.model.sim_summary
+        args = self.model.args
+        obs = []
 
-        def queue_len(event_name, start_tag):
-            waits = sum(1 for e in log if e['event'] == event_name)
-            starts = sum(1 for e in log if e['event'] == start_tag)
-            return max(0, waits - starts)
+        # --- System metrics ---
+        obs += [
+            summary.avg_total_wait_time,
+            summary.avg_fatigue,
+            summary.total_discharged,
+        ]
 
-        # Queue + Busy for each resource
-        for res, wait_tag, start_tag in zip(
-            ['triage', 'registration', 'exam', 'trauma', 'cubicle_1', 'cubicle_2'],
-            ['triage_wait_begins', 'MINORS_registration_wait_begins', 'MINORS_examination_wait_begins',
-             'TRAUMA_stabilisation_wait_begins', 'MINORS_treatment_wait_begins', 'TRAUMA_treatment_wait_begins'],
-            ['triage_begins', 'MINORS_registration_begins', 'MINORS_examination_begins',
-             'TRAUMA_stabilisation_begins', 'MINORS_treatment_begins', 'TRAUMA_treatment_begins']):
-            q = queue_len(wait_tag, start_tag)
-            b = self.resource_capacity[res] - len(getattr(self.model.args, res).items)
-            obs += [q, b]
+        # --- Bottleneck stats per unit ---
+        for unit in self.resource_targets:
+            util = summary.utilization.get(unit, 0.0)
+            qlen = summary.queue_lengths.get(unit, 0)
+            cap = getattr(args, f"n_{unit}", 1)
+            obs += [util, qlen / cap if cap > 0 else 0.0]
 
-        trauma_count = nontrauma_count = 0
-        for e in log:
-            if e['time'] > self.current_time - self.step_size and e['time'] <= self.current_time:
-                if e['event'] == 'triage_wait_begins':
-                    if e['pathway'] == 'Trauma':
-                        trauma_count += 1
-                    elif e['pathway'] == 'Non-Trauma':
-                        nontrauma_count += 1
-        obs += [trauma_count, nontrauma_count]
+        # --- MSO plan deviation ---
+        for i, unit in enumerate(self.resource_targets):
+            planned = self.latest_mso_plan[i] if i < len(self.latest_mso_plan) else 0.0
+            actual = summary.utilization.get(unit, 0.0)
+            obs.append(actual - planned)
 
-        obs += list(self.latest_mso_plan)
-        return np.array(obs, dtype=np.float32)
+        obs = np.array(obs, dtype=np.float32)
+        expected_dim = 3 + 2 * len(self.resource_targets) + len(self.resource_targets)
+        assert obs.shape[0] == expected_dim, f"[OBS ERROR] Got shape {obs.shape}, expected {expected_dim}"
+
+        if self.current_time < 500:
+            print(f"[DEBUG] Obs shape: {obs.shape}, contents: {obs}")
+
+        return obs
+
+
+
+
+
 
 
 
@@ -554,34 +574,40 @@ class HospitalSimEnv(gym.Env):
             total_cost += self.resource_capacity[res] * cost
         return total_cost
 
-    def _compute_step_reward(self, t0, t1):
-        """Compute reward during a regular step (per hour)."""
-        new_events = [e for e in self.model.full_event_log if t0 < e['time'] <= t1]
+    def _compute_step_reward(self, start_time, end_time):
+        """
+        Computes the reward for this step based on state improvements.
+        Assumes we're penalizing for idle time, delay, and rewarding throughput.
+        """
+        summary = self.model.sim_summary  # updated after env.run
+        reward = 0.0
 
-        discharges = sum(1 for e in new_events if e['event'] == 'depart')
-        avg_wait = self.model.get_overall_weighted_wait_time()
+        # Penalty for wait time
+        reward -= summary.avg_total_wait_time * 0.1
 
+        # Reward for throughput
+        reward += summary.total_discharged * 1.0
 
-        idle_resources = sum(len(getattr(self.model.args, res).items) for res in self.resource_targets)
-        
-        total_fatigue = 0.0
-        active_count = 0
-        for res_name in self.resource_targets:
-            store = getattr(self.model.args, res_name)
-            if hasattr(store, "items"):
-                for resource in store.items:
-                    if hasattr(resource, "fatigue"):
-                        total_fatigue += resource.fatigue
-                        active_count += 1
-        avg_fatigue = (total_fatigue / active_count) if active_count > 0 else 0.0
+        # Penalty for deviation from plan
+        plan_error = sum(abs(summary.utilization.get(unit, 0.0) - self.latest_mso_plan[i])
+                        for i, unit in enumerate(self.resource_targets))
+        reward -= plan_error * 0.5
 
-        reward = (
-            + 1.0 * discharges
-            - 0.05 * avg_wait
-            - 0.05 * avg_fatigue
-            - 0.02 * idle_resources
-        )
-        return np.clip(reward, -100, 100)
+        # Bonus: Penalty for resource idleness
+        idle_resources = 0
+        for res in self.resource_targets:
+            r = getattr(self.model.args, res)
+            if hasattr(r, 'capacity') and hasattr(r, 'count'):
+                idle_resources += (r.capacity - r.count)
+            elif hasattr(r, 'items'):
+                idle_resources += len(r.items)  # Store idle units
+        reward -= idle_resources * 0.05
+
+        # Optional: fatigue signal if you have it
+        reward -= summary.avg_fatigue * 0.2
+
+        return reward
+
 
     def _compute_shift_bonus(self):
         """Compute reward at the end of a shift."""

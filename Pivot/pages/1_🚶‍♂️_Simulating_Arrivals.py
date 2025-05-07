@@ -192,7 +192,7 @@ with tab2:
         )
 
 with tab1:
-    col1_1, col1_2= st.columns(2)
+    col1_1 = st.columns(2)
     # set number of resources
     with col1_1:
         seed = st.slider("🎲 Set a random number for the computer to start from",
@@ -208,58 +208,17 @@ with tab1:
                            step=1, value=10)
 
 
+    mean_arrivals_per_day = 30 # Choose a number for testing | Set to TRUE to check if working
 
-    with col1_2:
-        mean_arrivals_per_day = st.slider("🧍 How many patients should arrive per day on average?",
-                                          60, 300,
-                                          step=5, value=80)
+    args = Scenario(random_number_set=seed, manual_arrival_rate=60/(mean_arrivals_per_day/24), override_arrival_rate=False)
 
-        st.markdown("The graph below shows the distribution of time between arrivals for a sample of 2500 patients.")
-
-        # Will need to convert mean arrivals per day into interarrival time and share that
-        exp_dist = Exponential(mean=60/(mean_arrivals_per_day/24), random_seed=seed)
-        exp_fig = px.histogram(exp_dist.sample(size=2500),
-                                width=500, height=250,
-                                labels={
-                     "value": "Time between patients arriving (Minutes)"
-                 })
-
-        exp_fig.update_layout(yaxis_title="")
-
-        exp_fig.layout.update(showlegend=False,
-                              margin=dict(l=0, r=0, t=0, b=0))
-        exp_fig.update_xaxes(tick0=0, dtick=10, range=[0, 260])
-
-        st.plotly_chart(exp_fig,
-                        use_container_width=True,
-                        config = {'displayModeBar': False})
-
-        # set number of replication
-
-    args = Scenario(random_number_set=seed,
-                    # We want to pass the interarrival time here
-                    # To get from daily arrivals to average interarrival time,
-                    # divide the number of arrivals by 24 to get arrivals per hour,
-                    # then divide 60 by this value to get the number of minutes
-                    manual_arrival_rate=60/(mean_arrivals_per_day/24),
-                    override_arrival_rate=False)
-
-    # A user must press a streamlit button to run the model
+    # SIMULATION RUNNER
     button_run_pressed = st.button("Run simulation")
-
     if button_run_pressed:
 
-        # add a spinner and then display success box
         with st.spinner('Simulating the minor injuries unit...'):
-            # if not running_on_st_community:
-            #await asyncio.sleep(0.1)
-            # run multiple replications of experment
-            # results = multiple_replications(
-            #     args,
-            #     n_reps=n_reps,
-            #     rc_period=run_time_days*60*24
-            # )
-
+           
+            # Get Multiple Replications of the environment
             detailed_outputs = multiple_replications(
                 args,
                 n_reps=n_reps,
@@ -300,20 +259,6 @@ with tab1:
             """
         )
 
-        #progress_bar = st.progress(0)
-
-        # This all used to work nicely when running in standard streamlit, but in stlite the animated element no longer works
-        # So it's all a bit redundant and could be nicely simplified, but leaving for now as it works
-
-        # chart_mean_daily = st.bar_chart(results[['00_arrivals']].iloc[[0]]/run_time_days)
-        # chart_mean_daily = st.bar_chart(
-        #     results[['00_arrivals']].iloc[[0]] / run_time_days - results[['00_arrivals']].iloc[[0]] / run_time_days,
-
-        #     height=250
-
-        #     )
-        # chart_total = st.bar_chart(results[['00_arrivals']].iloc[[0]])
-
         results['00a_arrivals_difference'] = ((results[['00_arrivals']].iloc[0]['00_arrivals'].astype(int))/run_time_days) - (results['00_arrivals']/run_time_days)
 
         results["colour_00a"] = np.where(results['00a_arrivals_difference']<0, 'neg', 'pos')
@@ -335,13 +280,7 @@ with tab1:
             run_diff_bar_fig,
             use_container_width=True
             )
-
-        # st.table(pd.concat([
-        #         results[['00_arrivals']].astype('int'),
-        #         (results[['00_arrivals']]/run_time_days).round(0).astype('int')
-        #     ], axis=1, keys = ['Total Arrivals', 'Mean Daily Arrivals'])
-        #         )
-
+        
         status_text_string = 'The first simulation generated a total of {} patients (an average of {} patients per day)'.format(
             results[['00_arrivals']].iloc[0]['00_arrivals'].astype(int),
             (results[['00_arrivals']].iloc[0]
@@ -350,24 +289,17 @@ with tab1:
         status_text = st.text(status_text_string)
 
         for i in range(n_reps-1):
-            # Update progress bar.
-            # progress_bar.progress(n_reps/(i+1))
+
             time.sleep(0.5)
             new_rows = results[['00_arrivals']].iloc[[i+1]]
 
-            # Append data to the chart.
-            # chart_total.add_rows(new_rows)
-            # chart_mean_daily.add_rows(new_rows/run_time_days)
-            # chart_mean_daily.add_rows(
-            #     ((results[['00_arrivals']].iloc[[i+1]]['00_arrivals']/run_time_days) -
-            #     (results[['00_arrivals']].iloc[0]['00_arrivals']/run_time_days)).round(1)
-            # )
 
             status_text_string = 'Simulation {} generated a total of {} patients (an average of {} patients per day)'.format(
                     i+2,
                     new_rows.iloc[0]['00_arrivals'].astype(int),
                     (new_rows.iloc[0]['00_arrivals']/run_time_days).round(1)
                 ) + "\n" + status_text_string
+            
             # Update status text.
             status_text.text(status_text_string)
 
@@ -594,8 +526,6 @@ with tab1:
                 Clicking on it again will make it reappear.
 
                 By comparing the height of the two lines, you can see how similar or different the total number of patients generated are at any given point in time.
-
-
 
 
                 """

@@ -16,6 +16,8 @@ default_sim_config = {
     "n_cubicles_1": 3,
     "n_cubicles_2": 2,
     "random_number_set": 1,
+    'n_icu': 5,
+    'n_ward': 10,
     "prob_trauma": 0.12,
 }
 
