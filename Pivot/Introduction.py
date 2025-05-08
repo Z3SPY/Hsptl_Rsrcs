@@ -22,76 +22,91 @@ st.markdown(
 """
 This is a discrete event simulation playground based on the Monks et al (2022), which is itself an implementation of the Treatment Centre Model from Nelson (2013).
 
-By working through the pages on the left in order, you will
-- see how a discrete event simulation builds from simple beginnings up to the point of being able to model a complex system
-- understand the impact of variability and randomness on systems
-- have a go at changing parameters to find the best configuration that balances the average use of resources (like treatment bays or nurses) and the average time a patient will wait at each step of the process.
+Project Overview: Hospital Simulation with AI-Driven Resource Management
 
-The treatment centre we want to build a model of looks like this:
+    - Purpose: Model and optimize patient flow in a hospital using simulation and reinforcement learning.
+
+    - Method: Combines discrete event simulation (SimPy) with PPO/RAPPO agents for decision-making.
+
+    - Focus: AI controls staffing and resource allocation per shift, adapting to unpredictable patient demand.
+
+    - Objective: Reduce wait times, avoid overcrowding, and improve overall efficiency under real-world constraints.
+
+    - Tools: SimPy (for simulation), pyTorch (for RL), Streamlit + Plotly (for visualization).
+
+    - Outcome: A dynamic testbed for experimenting with smarter, data-driven hospital operations.
+
+
 """
 )
 
 
-mermaid(height=450, code=
+mermaid(height=800
+        
+        , code=
 """
-    %%{ init: { 'flowchart': { 'curve': 'step'} } }%%
-    %%{ init: {  'theme': 'base', 'themeVariables': {'lineColor': '#b4b4b4'} } }%%
-    flowchart LR
-        A[Arrival] --> B{Trauma or non-trauma}
-        B --> B1{Trauma Pathway}
-        B --> B2{Non-Trauma Pathway}
+  %%{ init: {
+        "flowchart": { "curve": "step" },
+        "theme": "base",
+        "themeVariables": { "lineColor": "#b4b4b4" }
+        }}%%
+        flowchart LR
 
-        B1 --> C[Stabilisation]
-        C --> E[Treatment]
+        A[Arrival] --> BX[Triage]
+        BX -.-> T([Triage Bay\nRESOURCE])
+        T -.-> BX
 
-        B2 --> D[Registration]
-        D --> G[Examination]
+        BX --> B{Trauma or Non-Trauma}
 
-        G --> H[Treat?]
-        H ----> F
-
-        H --> I[Non-Trauma Treatment]
-        I --> F
-
-        C -.-> Z([Trauma Room\n<b>RESOURCE</b>])
+        %% TRAUMA BRANCH
+        B --> TP[Trauma Pathway]
+        TP --> C[Stabilisation]
+        C --> E[Trauma Treatment]
+        C -.-> Z([Trauma Room\nRESOURCE])
         Z -.-> C
-
-        E -.-> Y([Cubicle - 1\n<b>RESOURCE</b>])
+        E -.-> Y([Cubicle 2\nRESOURCE])
         Y -.-> E
 
-        D -.-> X([Clerks\n<b>RESOURCE</b>])
+        %% Trauma outcome split
+        E --> DT[Discharge]
+        E --> WT[Ward Admission]
+        E --> IT[ICU Admission]
+        WT --> WTB([Ward Beds])
+        IT --> ICU2([ICU Beds])
+
+        %% NON-TRAUMA BRANCH
+        B --> NP[Non-Trauma Pathway]
+        NP --> D[Registration]
+        D -.-> X([Clerks\nRESOURCE])
         X -.-> D
-
-        G -.-> W([Exam Room\n<b>RESOURCE</b>])
+        D --> G[Examination]
+        G -.-> W([Exam Room\nRESOURCE])
         W -.-> G
+        G --> H{Needs Treatment?}
 
-        I -.-> V([Cubicle - 2\n<b>RESOURCE</b>])
+        H --> DN[Discharge]
+        H --> I[Non-Trauma Treatment]
+        I -.-> V([Cubicle 1\nRESOURCE])
         V -.-> I
 
-        E ----> F[Discharge]
+        %% Non-Trauma outcome split
+        I --> DN2[Discharge]
+        I --> WN[Ward Admission]
+        I --> IN[ICU Admission]
+        WN --> WNB([Ward Beds])
+        IN --> ICU1([ICU Beds])
 
-        classDef ZZ1 fill:#47D7FF,font-family:lexend
-        classDef ZZ2 fill:#5DFDA0,font-family:lexend
-        classDef ZZ2a fill:#02CD55,font-family:lexend, color:#FFF
-        classDef ZZ3 fill: #D45E5E,font-family:lexend
-        classDef ZZ3a fill: #932727,font-family:lexend, color:#FFF
-        classDef ZZ4 fill: #611D67,font-family:lexend, color:#FFF
+        %% Node styling
+        classDef res fill:#e6f7ff,stroke:#007acc,stroke-width:2px,color:#003366;
+        classDef start fill:#02CD55,color:#fff,font-weight:bold;
+        classDef path fill:#ccc,stroke:#666;
 
-        class A,B ZZ1
-        class C,E ZZ2
-        class D,G ZZ3
-        class X,W ZZ3a
-        class Z,Y ZZ2a
-        class I,V ZZ4;
+        class A start;
+        class Z,Y,X,W,V,WTB,ICU2,WNB,ICU1 res;
+        class TP,NP,C,E,D,G,H,I path;
+
+
+     
     """
 )
 
-st.markdown(
-"""
-## References
-
-1. *Monks.T, Harper.A, Anagnoustou. A, Allen.M, Taylor.S. (2022) Open Science for Computer Simulation*; [Repository Link](https://github.com/TomMonks/treatment-centre-sim/tree/main)
-2. *Nelson. B.L. (2013). [Foundations and methods of stochastic simulation](https://www.amazon.co.uk/Foundations-Methods-Stochastic-Simulation-International/dp/1461461596/ref=sr_1_1?dchild=1&keywords=foundations+and+methods+of+stochastic+simulation&qid=1617050801&sr=8-1). Springer.*
-3. https://health-data-science-or.github.io/simpy-streamlit-tutorial/
-"""
-)

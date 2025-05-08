@@ -4,7 +4,14 @@ A Streamlit application based on the open treatment centre simulation model from
 Original Model: https://github.com/TomMonks/treatment-centre-sim/tree/main
 
 Allows users to interact with an increasingly complex treatment simulation
+
 '''
+
+import base64
+
+def get_base64_encoded_image(path):
+    with open(path, "rb") as image_file:
+        return base64.b64encode(image_file.read()).decode()
 import gc
 import asyncio
 import pandas as pd
@@ -42,7 +49,7 @@ st.markdown("Once you have run more than one scenario, try out the new tab 'comp
 gc.collect()
 
 # tab1, tab2, tab3, tab4 = st.tabs(["Introduction", "Exercises", "Playground", "Compare Scenario Outputs"])
-tab4, tab2, tab1, tab3 = st.tabs(["Information", "Exercise", "Playground", "Compare Scenario Outputs"])
+tab4, tab1, tab3 = st.tabs(["Information","Playground", "Compare Scenario Outputs"])
 
 with tab4:
     st.markdown("""
@@ -57,84 +64,69 @@ with tab4:
                 """
                 )
 
-    mermaid(height=600, code=
+    mermaid(height=800, code=
     """
-    %%{ init: { 'flowchart': { 'curve': 'step' } } }%%
-    %%{ init: {  'theme': 'base', 'themeVariables': {'lineColor': '#b4b4b4'} } }%%
-    flowchart LR
+    %%{ init: {
+        "flowchart": { "curve": "step" },
+        "theme": "base",
+        "themeVariables": { "lineColor": "#b4b4b4" }
+        }}%%
+        flowchart LR
+
         A[Arrival] --> BX[Triage]
-        BX -.-> T([Triage Bay\n<b>RESOURCE</b>])
+        BX -.-> T([Triage Bay\nRESOURCE])
         T -.-> BX
 
-        BX --> BY{Trauma or non-trauma}
-        BY ----> B1{Trauma Pathway}
-        BY ----> B2{Non-Trauma Pathway}
+        BX --> B{Trauma or Non-Trauma}
 
-        B1 --> C[Stabilisation]
-        C --> E[Treatment]
-
-        B2 --> D[Registration]
-        D --> G[Examination]
-
-        G --> H[Treat?]
-        H ----> F
-
-        H --> I[Non-Trauma Treatment]
-        I --> F
-
-        C -.-> Z([Trauma Room\n<b>RESOURCE</b>])
+        %% TRAUMA BRANCH
+        B --> TP[Trauma Pathway]
+        TP --> C[Stabilisation]
+        C --> E[Trauma Treatment]
+        C -.-> Z([Trauma Room\nRESOURCE])
         Z -.-> C
-
-        E -.-> Y([Cubicle - 1\n<b>RESOURCE</b>])
+        E -.-> Y([Cubicle 2\nRESOURCE])
         Y -.-> E
 
-        D -.-> X([Clerks\n<b>RESOURCE</b>])
+        %% Trauma outcome split
+        E --> DT[Discharge]
+        E --> WT[Ward Admission]
+        E --> IT[ICU Admission]
+        WT --> WTB([Ward Beds])
+        IT --> ICU2([ICU Beds])
+
+        %% NON-TRAUMA BRANCH
+        B --> NP[Non-Trauma Pathway]
+        NP --> D[Registration]
+        D -.-> X([Clerks\nRESOURCE])
         X -.-> D
-
-        G -.-> W([Exam Room\n<b>RESOURCE</b>])
+        D --> G[Examination]
+        G -.-> W([Exam Room\nRESOURCE])
         W -.-> G
+        G --> H{Needs Treatment?}
 
-        I -.-> V([Cubicle - 2\n<b>RESOURCE</b>])
+        H --> DN[Discharge]
+        H --> I[Non-Trauma Treatment]
+        I -.-> V([Cubicle 1\nRESOURCE])
         V -.-> I
 
-        E ----> F[Discharge]
+        %% Non-Trauma outcome split
+        I --> DN2[Discharge]
+        I --> WN[Ward Admission]
+        I --> IN[ICU Admission]
+        WN --> WNB([Ward Beds])
+        IN --> ICU1([ICU Beds])
 
-        classDef ZZ1 fill:#8B5E0F,font-family:lexend, color:#FFF
-        classDef ZZ2 fill:#5DFDA0,font-family:lexend
-        classDef ZZ2a fill:#02CD55,font-family:lexend, color:#FFF
-        classDef ZZ3 fill: #D45E5E,font-family:lexend
-        classDef ZZ3a fill: #932727,font-family:lexend, color:#FFF
-        classDef ZZ4 fill: #611D67,font-family:lexend, color:#FFF
-        classDef ZZ5 fill:#47D7FF,font-family:lexend
-        classDef ZZ5a fill:#00AADA,font-family:lexend
+        %% Node styling
+        classDef res fill:#e6f7ff,stroke:#007acc,stroke-width:2px,color:#003366;
+        classDef start fill:#02CD55,color:#fff,font-weight:bold;
+        classDef path fill:#ccc,stroke:#666;
 
-        class A ZZ1
-        class C,E ZZ2
-        class D,G ZZ3
-        class X,W ZZ3a
-        class Z,Y ZZ2a
-        class I,V ZZ4
-        class BX ZZ5
-        class T ZZ5a
-        ;
+        class A start;
+        class Z,Y,X,W,V,WTB,ICU2,WNB,ICU1 res;
+        class TP,NP,C,E,D,G,H,I path;
     """
 )
-
-with tab2:
-    st.header("Things to Try")
-
-    st.markdown(
-        """
-        - First, just run the model with the default settings.
-            - Look at the graphs and animated patient log. What is the performance of the system like?
-            - Are the queues consistent throughout the day?
-        ---
-        - Due to building work taking place, the hospital will temporarily need to close several bays.
-        It will be possible to have a maximum of 20 bays/cubicles/rooms in total across the whole system.
-            - What is the best configuration you can find to keep the average wait times as low as possible across both trauma and non-trauma pathways?
-        *Make sure you are using the default probabilities for trauma/non-trauma patients (0.3) and treatment of non-trauma patients (0.7)*
-        """
-    )
 
 with tab1:
 
@@ -171,6 +163,11 @@ with tab1:
         prob_trauma = st.slider("🚑 Probability that a new arrival is a trauma patient",
                                 0.0, 1.0, step=0.01, value=0.3,
                                 help="0 = No arrivals are trauma patients\n\n1 = All arrivals are trauma patients")
+        
+        st.markdown("### 🏥 Bed Resources")
+        n_icu_beds = st.slider("Number of ICU Beds", min_value=1, max_value=20, value=5)
+        n_ward_beds = st.slider("Number of Ward Beds", min_value=1, max_value=50, value=20)
+        
 
     with col2:
         st.subheader("Trauma Pathway")
@@ -216,7 +213,10 @@ with tab1:
                  n_cubicles_1=n_cubicles_1,
                  n_cubicles_2=n_cubicles_2,
                  non_trauma_treat_p=non_trauma_treat_p,
-                 prob_trauma=prob_trauma)
+                 prob_trauma=prob_trauma,
+                 n_icu=n_icu_beds,       
+                 n_ward=n_ward_beds      
+            )
 
     # A user must press a streamlit button to run the model
     button_run_pressed = st.button("Run simulation")
@@ -352,19 +352,19 @@ with tab1:
 
                 # Minors (non-trauma) pathway
                 {'event': 'MINORS_registration_wait_begins',
-                 'x':  290, 'y': 145, 'label': "Waiting for<br>Registration"  },
+                 'x':  290, 'y': 125, 'label': "Waiting for<br>Registration"  },
                 {'event': 'MINORS_registration_begins',
-                 'x':  290, 'y': 85, 'resource':'n_reg', 'label':'Being<br>Registered'  },
+                 'x':  290, 'y': 65, 'resource':'n_reg', 'label':'Being<br>Registered'  },
 
                 {'event': 'MINORS_examination_wait_begins',
-                 'x':  460, 'y': 145, 'label': "Waiting for<br>Examination"  },
+                 'x':  460, 'y': 125, 'label': "Waiting for<br>Examination"  },
                 {'event': 'MINORS_examination_begins',
-                 'x':  460, 'y': 85, 'resource':'n_exam', 'label': "Being<br>Examined" },
+                 'x':  460, 'y': 65, 'resource':'n_exam', 'label': "Being<br>Examined" },
 
                 {'event': 'MINORS_treatment_wait_begins',
-                 'x':  625, 'y': 145, 'label': "Waiting for<br>Treatment"  },
+                 'x':  625, 'y': 125, 'label': "Waiting for<br>Treatment"  },
                 {'event': 'MINORS_treatment_begins',
-                 'x':  625, 'y': 85, 'resource':'n_cubicles_1', 'label': "Being<br>Treated" },
+                 'x':  625, 'y': 65, 'resource':'n_cubicles_1', 'label': "Being<br>Treated" },
 
                 # Trauma pathway
                 {'event': 'TRAUMA_stabilisation_wait_begins',
@@ -376,6 +376,31 @@ with tab1:
                  'x': 625, 'y': 560, 'label': "Waiting for<br>Treatment" },
                 {'event': 'TRAUMA_treatment_begins',
                  'x': 625, 'y': 500, 'resource':'n_cubicles_2', 'label': "Being<br>Treated" },
+
+
+                # Post-treatment ward/ICU pathways (shared by trauma and non-trauma)
+                {'event': 'ward_admission',
+                 'x': 800, 'y': -100, 'label': "Admitted to<br>Ward" },
+                {'event': 'ward_discharge',
+                 'x': 800, 'y': -100, 'label': "Leaving<br>Ward" },
+
+                {'event': 'icu_admission',
+                 'x': 800, 'y': -100, 'label': "Admitted to<br>ICU" },
+                {'event': 'icu_discharge',
+                 'x': 800, 'y': -100, 'label': "Leaving<br>ICU" },
+
+                # Optional: Waiting queues before ICU/ward (only if modeled)
+                {'event': 'TRAUMA_ward_wait_begins',
+                 'x': 800, 'y': -100, 'label': "Waiting for<br>Ward Bed" },
+                {'event': 'MINORS_ward_wait_begins',
+                 'x': 800, 'y': -100, 'label': "Waiting for<br>Ward Bed" },
+
+                {'event': 'TRAUMA_icu_wait_begins',
+                 'x': 800, 'y': -100, 'label': "Waiting for<br>ICU Bed" },
+                {'event': 'MINORS_icu_wait_begins',
+                 'x': 800, 'y': -100, 'label': "Waiting for<br>ICU Bed" },
+
+
 
                  {'event': 'exit',
                  'x':  670, 'y': 330, 'label': "Exit"}
@@ -403,6 +428,10 @@ with tab1:
                 gap_between_rows=25,
                 step_snapshot_max=30
                 )
+            
+            image_base64 = get_base64_encoded_image("resources/Full Model.png")
+            background_url = f"data:image/png;base64,{image_base64}"
+
 
             animated_plot = generate_animation(
                     full_patient_df_plus_pos=full_patient_df_plus_pos,
@@ -418,7 +447,7 @@ with tab1:
                     time_display_units="dhm",
                     # show_animated_clock=True,
                     # animated_clock_coordinates = [100, 50],
-                    add_background_image="https://raw.githubusercontent.com/hsma-programme/Teaching_DES_Concepts_Streamlit/main/resources/Full%20Model%20Background%20Image%20-%20Horizontal%20Layout.drawio.png",
+                    add_background_image=background_url,
             )
 
             del animation_dfs_log
@@ -462,7 +491,7 @@ with tab1:
 
         with tab_playground_results_1:
 
-            in_range_util = sum((results.mean().filter(like="util")<0.85) & (results.mean().filter(like="util") > 0.65))
+            in_range_util = sum((results.mean().filter(like="util")<0.85) & (results.mean().filter(like="util") > 0.50))
             in_range_wait = sum((results.mean().filter(like="wait")<120))
 
 
@@ -484,18 +513,32 @@ with tab1:
                     """
                 )
                 util_fig_simple = go.Figure()
-                # Add optimum range
-                util_fig_simple.add_hrect(y0=0.65, y1=0.85,
-                                          fillcolor="#5DFDA0", opacity=0.25,  line_width=0)
-                # Add extreme range (above)
-                util_fig_simple.add_hrect(y0=0.85, y1=1,
-                                          fillcolor="#D45E5E", opacity=0.25, line_width=0)
-                # Add suboptimum range (below)
-                util_fig_simple.add_hrect(y0=0.4, y1=0.65,
-                                          fillcolor="#FDD049", opacity=0.25, line_width=0)
-                # Add extreme range (below)
-                util_fig_simple.add_hrect(y0=0, y1=0.4,
-                                          fillcolor="#D45E5E", opacity=0.25, line_width=0)
+               # Optimum range: 50%–85%
+                util_fig_simple.add_hrect(
+                    y0=0.50, y1=0.85,
+                    fillcolor="#5DFDA0", opacity=0.25, line_width=0
+                )
+
+                # Above optimum
+                util_fig_simple.add_hrect(
+                    y0=0.85, y1=1,
+                    fillcolor="#D45E5E", opacity=0.25, line_width=0
+                )
+
+                # Suboptimum (low) – now 30%–50%
+                util_fig_simple.add_hrect(
+                    y0=0.30, y1=0.50,
+                    fillcolor="#FDD049", opacity=0.25, line_width=0
+                )
+
+                # Extreme underuse (0%–30%)
+                util_fig_simple.add_hrect(
+                    y0=0, y1=0.30,
+                    fillcolor="#D45E5E", opacity=0.25, line_width=0
+                )
+                
+                st.write("Actual Utilization Columns:", results.mean().filter(like="util").index.tolist())
+
 
                 util_fig_simple.add_bar(x=results.mean().filter(like="util").index.tolist(),
                                         y=results.mean().filter(like="util").tolist())
@@ -937,7 +980,7 @@ with tab3:
             output_scenario_df['formatted_value'] =  np.where(
                 output_scenario_df['index'].str.contains("wait|time"), (output_scenario_df['value'].round(1)).astype(str) + " minutes",
                 np.where(output_scenario_df['index'].str.contains("util|perc"), ((output_scenario_df['value']*100).round(1)).astype(str) + "%",
-                np.where(output_scenario_df['index'].str.contains("arrivals|throughput"), (output_scenario_df['value'].astype(int)).astype(str),
+                np.where(output_scenario_df['index'].str.contains("arrivals|throughput"), output_scenario_df['value'].fillna(0).replace([np.inf, -np.inf], 0).astype(int).astype(str),
                          output_scenario_df['value']
                          ))
             )

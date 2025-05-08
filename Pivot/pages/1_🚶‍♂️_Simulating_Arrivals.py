@@ -37,60 +37,18 @@ with open("style.css") as css:
     st.markdown(f'<style>{css.read()}</style>', unsafe_allow_html=True)
 
 # We add in a title for our web app's page
-st.title("Discrete Event Simulation Playground")
+st.title("DES Playground")
 st.subheader("Simulating Patients Arriving at the Centre")
 
 gc.collect()
 
-tab3, tab2, tab1 = st.tabs(["Information", "Exercise", "Playground"])
+tab2, tab1 = st.tabs(["Information",  "Playground"])
 
-with tab3:
+with tab2:
 
     st.markdown(
         "Let's start with just having some patients arriving into our treatment centre.")
 
-    mermaid(height=350, code="""
-            %%{ init: {  'flowchart': { 'curve': 'step'} } }%%
-            %%{ init: {  'theme': 'base', 'themeVariables': {'lineColor': '#b4b4b4'} } }%%
-            flowchart LR
-            A[Arrival] --> B{Trauma or non-trauma}
-            B --> B1{Trauma Pathway}
-            B --> B2{Non-Trauma Pathway}
-
-            B1 --> C[Stabilisation]
-            C --> E[Treatment]
-            E ----> F
-
-            B2 --> D[Registration]
-            D --> G[Examination]
-
-            G --> H[Treat?]
-            H ----> F[Discharge]
-            H --> I[Non-Trauma Treatment]
-            I --> F
-
-            C -.-> Z([Trauma Room])
-            Z -.-> C
-
-            E -.-> Y([Cubicle - 1])
-            Y -.-> E
-
-            D -.-> X([Clerks])
-            X -.-> D
-
-            G -.-> W([Exam Room])
-            W -.-> G
-
-            I -.-> V([Cubicle - 2])
-            V -.-> I
-
-            classDef highlight fill:#02CD55,stroke:#E8AD02,stroke-width:4px,color:#0C0D11,font-size:12pt,font-family:lexend;
-            classDef unlight fill:#b4b4b4,stroke:#787878,stroke-width:2px,color:#787878,font-size:6pt,font-family:lexend;
-
-            class A highlight;
-            class B,B1,B2,C,D,E,F,G,H,I,J,K,L,M,N,O,P,Q,R,S,T,U,V,W,X,Y,Z unlight;
-        """
-            )
 
     st.markdown(
     """
@@ -109,96 +67,18 @@ with tab3:
                             margin=dict(l=0, r=0, t=0, b=0))
     st.plotly_chart(exp_fig_example, use_container_width=True)
 
-    st.markdown(
-"""
-To start with, we're just going to assume people arrive at a consistent rate throughout all 24 hours of the day. This isn't very realistic, but we can refine this later.
+    
 
-
-When a patient arrives, the computer will pick a random number from this distribution to decide how long it will be before the next patient arrives at our treatment centre.
-
-Where the bar is very high, there is a high chance that the random number picked will be somewhere around that value.
-
-Where the bar is very low, it's very unlikely that the number picked will be from around that area - but it's not impossible.
-
-So what this ends up meaning is that, in this case, it's quite likely that the gap between each patient turning up at our centre will be somewhere between 0 and 10 minutes - and in fact, most of the time, someone will turn up every 2 or 3 minutes. However, now and again, we'll get a quiet period - and it might be 20 or 30 minutes until the next person arrives.
-
-This is quite realistic for a lot of systems - people tend to arrive fairly regularly, but sometimes the gap will be longer.
-
-As we get into more complex models, we can vary the distribution for different times of day or different months of the year so we can reflect real-world patterns better, but for now, we're just going to assume the arrival pattern is consistent.
-
-# Variability and Computers
-
-Without getting too philosophical, the version of reality that happens is just one possible version!
-
-Maybe we're going to get a really hot summer that means our department is busier due to heatstroke and people having accidents outside.
-Maybe it will rain all summer and everyone will stay indoors.
-
-And what if lots of people turn up really close together? How well does our department cope with that?
-
-
-So instead of just generating one set of arrivals, we will run the simulation multiple times.
-
-The first time the picks might be like this:
-
-**5 minute gap, 4 minute gap, 5 minute gap, 6 minute gap**
-
-The next time they might be like this:
-
-**4 minute gap, 25 minute gap, 2 minute gap, 1 minute gap**
-
-And so on.
-
-## Random seeds
-
-Because computers aren't very good at being truly random, we give them a little nudge by telling them a 'random seed' to start from.
-
-You don't need to worry about how that works - but if our random seed is 1, we will draw a different set of times from our distribution to if our random seed is 100.
-
-This allows us to make lots of different realities!
-"""
-    )
-
-
-with tab2:
-
-    st.subheader("Things to Try Out")
-
-    st.markdown(
-        """
-        - Try changing the slider with the title *'How many patients should arrive per day on average?'*.
-
-        Look at the graph below it. The horizontal axis (the bottom one) shows the number of minutes
-
-        How does the shape of the graph change when you change the value?
-        ---
-        - Change the slider *'How many patients should arrive per day on average?'* back to the default (80) and click on 'Run simulation'.
-            - Look at the charts that show the variation in patient arrivals per simulation run.
-            - Look at the scatter (dot) plots at the bottom of the page to understand how the arrival times of patients varies across different simulation runs and different days.
-                - Hover over the dots to see more detail about the arrival time of each patient. By 6am, roughly how many patients have arrived in each simulation run?
-            - Think about how this randomness in arrival times across different runs could be useful.
-        ---
-        - Try changing the random number the computer uses without changing anything else. What happens to the number of patients? Do the bar charts and histograms look different?
-
-        """)
-
-    with st.expander("Click here for bonus exercises"):
-        st.markdown(
-            """
-            ---
-            - Try running the simulation for under 5 days. What happens to the height of the bars in the first bar chart compared to running the simulation for more days? Are the bars larger or smaller?
-            ---
-            - Try increasing the number of simulation runs. What do you notice about the *shape* of the histograms? Where are the bars highest?
-            """
-        )
 
 with tab1:
-    col1_1 = st.columns(2)
+    col1_1, col1_2= st.columns(2)
     # set number of resources
     with col1_1:
         seed = st.slider("🎲 Set a random number for the computer to start from",
                         1, 1000,
                         step=1, value=103)
 
+    with col1_2:
         run_time_days = st.slider("🗓️ How many days should we run the simulation for each time?",
                                   1, 31,
                                   step=1, value=15)

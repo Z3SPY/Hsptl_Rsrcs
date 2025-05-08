@@ -36,119 +36,15 @@ st.subheader("Making Patients Behave Differently: Adding in an Optional Step")
 gc.collect()
 
 # tab1, tab2, tab3 = st.tabs(["Introduction", "Exercise", "Playground"])
-tab3, tab2, tab1 = st.tabs(["Information", "Exercise", "Playground"])
+tab3, tab1 = st.tabs(["test", "Playground"])
 
 with tab3:
 
     st.markdown("""
-                Now, it's not as simple as all of our patients being looked at by a nurse and then sent on their merry way.
-
-                Some of them - but not all of them - may require another step where they undergo some treatment.
-
-                So for some people, their pathway looks like this:
+               Sampling flows and logic
                 """)
 
 
-    mermaid(height=175, code=
-        """
-                %%{ init: { 'flowchart': { 'curve': 'step' } } }%%
-                %%{ init: {  'theme': 'base', 'themeVariables': {'lineColor': '#b4b4b4'} } }%%
-                flowchart LR
-
-                A[Arrival]----> B[Advice]
-
-                B -.-> F([Nurse/Cubicle])
-                F -.-> B
-
-                B----> C[Treatment]
-
-                C -.-> G([Nurse/Cubicle])
-                G -.-> C
-
-                C ----> Z[Discharge]
-
-                classDef default font-size:18pt,font-family:lexend;
-                linkStyle default stroke:white;
-            """
-        )
-
-    st.markdown("But for other simpler cases, their pathway still looks like this!")
-
-    mermaid(height=175, code=
-        """
-                %%{ init: { 'flowchart': { 'curve': 'step' } } }%%
-                %%{ init: {  'theme': 'base', 'themeVariables': {'lineColor': '#b4b4b4'} } }%%
-                flowchart LR
-
-                A[Arrival]----> B[Advice]
-
-                B -.-> F([Nurse/Cubicle])
-                F -.-> B
-
-                B ----> Z[Discharge]
-
-                classDef default font-size:18pt,font-family:lexend;
-                linkStyle default stroke:white;
-            """
-        )
-
-    st.markdown(
-        """
-        So how do we ensure that some of our patients go down one pathway and not the other?
-
-        You guessed it - the answer is sampling from a distribution again!
-
-        We can tell the computer the rough split we'd like to say - let's say 30% of our patients need the treatment step, but the other 70% will
-
-        And as before, there will be a bit of randomness, just like in the real world.
-        In one simulation, we might end up with a 69/31 split, and the next might be 72/28, but it will always be around the expected split we've asked for.
-        """
-    )
-
-    st.markdown(
-        """
-        We can think of our pathway as looking like this overall:
-        """
-    )
-
-    mermaid(height=225, code=
-        """
-                %%{ init: { 'flowchart': { 'curve': 'step' } } }%%
-                %%{ init: {  'theme': 'base', 'themeVariables': {'lineColor': '#b4b4b4'} } }%%
-                flowchart LR
-
-                A[Arrival]--> B[Advice]
-
-                B -.-> F([Nurse/Cubicle])
-                F -.-> B
-
-                B----> |30% of patients| C[Treatment]
-
-                C -.-> G([Nurse/Cubicle])
-                G -.-> C
-
-                B ----> |70% of patients| Z[Discharge]
-                C --> Z
-
-                classDef default font-size:18pt,font-family:lexend;
-                linkStyle default stroke:white;
-            """
-        )
-
-with tab2:
-    st.markdown(
-    """
-    ### Things to Try Out
-
-    - Run the simulation with the default values and look at the graph 'Percentage of clients requiring treatment per simulation run' on the 'Simple Graphs' tab after running the model. This shows the split between patients who do and don't require treatment. What do you notice?
-    ---
-    - What impact does changing the number of patients who go down this extra route (the 'probability that a patient will need treatment') have on our treatment centre's performance with the default number of nurses and doctors at each stage?
-    ---
-    - Change the split of patients requiring treatment back to 0.5.
-        - Can you optimize the number of nurses or doctors at each step for the different pathways to balance resource utilisation and queues?
-
-    """
-    )
 
 with tab1:
 

@@ -38,29 +38,11 @@ st.subheader("Using a Simple Resource: Sending Patients to be Treated")
 gc.collect()
 
 # tab1, tab2, tab3 = st.tabs(["Introduction", "Exercise", "Playground"])
-tab3, tab2, tab1 = st.tabs(["Information", "Exercise", "Playground"])
+tab3, tab1 = st.tabs(["Information", "Playground"])
 
 with tab3:
 
-    st.markdown(
-        """
-        Now, it's all well and good having patients arrive, but at the moment there is no-one and nowhere to see them!
 
-    We need to add our first resource.
-
-    Resources exist inside our simulation, and can be nurses, rooms, ambulances - whatever we need them to be.
-
-    When someone reaches the front of the queue, they will be allocated to a resource that is currently free.
-    They will hold onto this resource for as long as they need it, and then they will let go of it and move on to the next part of the process.
-
-    This means resources can continue to be reused again and again in the system, unlike our arrivals.
-
-    So for now, let's make it so that when someone arrives, they need to be treated, and to do this they will need a resource.
-    For now, we're keeping it simple - let's assume each nurse has a room that they treat people in. They always stay in this room, and as soon as a patient has finished being treated, the patient will leave and the nurse (and room) will become available again.
-
-    This means we just have one type of resource to worry about.
-    """
-    )
 
     mermaid(height=175, code=
     """
@@ -101,38 +83,6 @@ with tab3:
     - how long each patient waits before they get allocated a resource
     - what percentage of patients meet a target of being treated within 2 hours of turning up to our treatment centre
     """)
-
-
-
-
-with tab2:
-    st.markdown(
-        """
-        ### Things to Try Out
-
-        - Try changing the sliders for consultation time and variation in consultation time.
-        What happens to the shape of the graph below the sliders?
-        ---
-        - Put the consulation times back to the default (50 minutes length on average, 10 minutes of variation).
-        Run the model and take a look at the animated flow of patients through the system. What do you notice about
-            - the number of nurses in use? Do they ever get any breaks?
-            - the size of the queue for treatment at different times - does it get bigger and smaller at different times, or just keep growing?
-        ---
-        - What happens when you play around with the number of nurses we have available?
-            - Look at the queues, but look at the resource utilisation too. The resource utilisation tells us how much of the time each nurse is busy rather than waiting for a patient to turn up.
-            - Can you find a middle ground where the nurse is being used a good amount without the queues building up?
-        ---
-        """)
-
-    with st.expander("Click here for bonus exercises"):
-        st.markdown(
-        """
-        - What happens to the average utilisation and waits when you keep the number of nurses the same but change
-            - the average length of time it takes each patient to be seen?
-            - the variability in the length of time it takes each patient to be seen?
-
-        """
-    )
 
 
 with tab1:

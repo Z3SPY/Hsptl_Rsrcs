@@ -168,49 +168,24 @@ class CustomResource(simpy.Resource):
         # For example, you can reset the ID attribute
         # reset_id_logic(self.id_attribute)
         return super().release(*args, **kwargs)
-# def patch_resource(resource, pre=None, post=None):
-#     """
-#     Part of the required code for event-based auditing of resources (so records each time
-#     utilisation of a resource changes in some way, as opposed to recording after
-#     defined time intervals)
 
-#     Patch *resource* so that it calls the callable *pre* before each
-#      put/get/request/release operation and the callable *post* after each
-#      operation.  The only argument to these functions is the resource
-#      instance.
+class IdentifiedResource:
+    """A resource wrapper that gives each unit a unique numeric ID (for animation)."""
+    def __init__(self, env, n_units, name="unit"):
+        self.env = env
+        self.name = name
+        self.store = simpy.Store(env)
+        for i in range(n_units):
+            self.store.put({"id": i, "busy": False})
 
-#      From
-#      https://simpy.readthedocs.io/en/4.0.1/topical_guides/monitoring.html?highlight=monitor#resource-usage
+    def request(self):
+        return self.store.get()
 
-#     Used for event-based monitoring (as opposed to interval-based monitoring)
+    def release(self, unit):
+        unit["busy"] = False
+        self.store.put(unit)
 
-#      """
 
-#     def get_wrapper(func):
-#         # Generate a wrapper for put/get/request/release
-#         @wraps(func)
-#         def wrapper(*args, **kwargs):
-#             # This is the actual wrapper
-#             # Call "pre" callback
-#             if pre:
-#                 pre(resource)
-
-#             # Perform actual operation
-#             ret = func(*args, **kwargs)
-
-#             # Call "post" callback
-#             if post:
-#                 post(resource)
-
-#             return ret
-#         return wrapper
-
-#     # Replace the original operations with our wrapper
-#     for name in ['put', 'get', 'request', 'release']:
-#         if hasattr(resource, name):
-#             setattr(resource, name, get_wrapper(getattr(resource, name)))
-
-# ## Model parameterisation
 
 class Scenario:
     def __init__(self,
@@ -336,7 +311,7 @@ class Scenario:
         # LOS Sampling
         # =================================
         self.unit_transition_probs = {
-            1: [0.25, 0.40, 0.35],
+            1: [0.15, 0.40, 0.45],
             2: [0.15, 0.45, 0.40],
             3: [0.12, 0.40, 0.48],
             4: [0.10, 0.38, 0.52],
@@ -460,6 +435,14 @@ class Scenario:
             # thinning uniform rng
             self.thinning_rng = Uniform(low=0.0, high=1.0,  # pylint: disable=attribute-defined-outside-init
                                         random_seed=self.seeds[9])
+            
+
+
+    def __setitem__(self, key, value):
+        setattr(self, key, value)
+
+
+
 
 
 # ========================================
@@ -616,6 +599,7 @@ class TraumaPathway:
              'event_type': 'resource_use_end',
              'event': 'triage_complete',
              'time': self.env.now,
+             'wait_time': self.wait_triage,
              'resource_id': triage_resource.id_attribute}
         )
 
@@ -676,6 +660,7 @@ class TraumaPathway:
              'event_type': 'resource_use_end',
              'event': 'TRAUMA_stabilisation_complete',
              'time': self.env.now,
+             'wait_time': self.wait_trauma,
              'resource_id': trauma_resource.id_attribute
             }
         )
@@ -738,6 +723,7 @@ class TraumaPathway:
              'event_type': 'resource_use_end',
              'event': 'TRAUMA_treatment_complete',
              'time': self.env.now,
+             'wait_time': self.wait_treat,
              'resource_id': trauma_treatment_resource.id_attribute}
         )
 
@@ -770,38 +756,49 @@ class TraumaPathway:
             ward_request_time = self.env.now
 
             self.full_event_log.append({
-                    'patient': self.identifier,
-                    'pathway': 'Trauma',
-                    'event': 'TRAUMA_ward_wait_begins',
-                    'event_type': 'queue',
-                    'time': ward_request_time
-                })
+                'patient': self.identifier,
+                'pathway': 'Trauma',
+                'event': 'TRAUMA_ward_wait_begins',
+                'event_type': 'queue',
+                'time': ward_request_time
+            })
 
-            with self.args.ward_beds.request() as req:
-                yield req
-                self.wait_ward = self.env.now - ward_request_time
+            # 🔁 Get a ward bed with unique ID
+            ward_bed = yield self.args.ward_beds.request()
+            ward_bed["busy"] = True
+            self.wait_ward = self.env.now - ward_request_time
 
-                self.full_event_log.append({
-                    'patient': self.identifier,
-                    'event': 'ward_admission',
-                    'event_type': 'resource_use',
-                    'unit': 'ward',
-                    'severity': self.severity,
-                    'time': self.env.now
-                })
+            self.full_event_log.append({
+                'patient': self.identifier,
+                'event': 'ward_admission',
+                'event_type': 'resource_use',
+                'resource': 'ward_beds',
+                'resource_id': ward_bed["id"],  # ✅ required for animation
+                'unit': 'ward',
+                'severity': self.severity,
+                'time': self.env.now
+            })
 
-                los = self.args.ward_los.get(self.severity, 1800)
-                self.ward_duration = los
-                yield self.env.timeout(self.ward_duration)
+            los = self.args.ward_los.get(self.severity, 1800)
+            self.ward_duration = los
+            yield self.env.timeout(self.ward_duration)
 
-                self.full_event_log.append({
-                    'patient': self.identifier,
-                    'event': 'ward_discharge',
-                    'event_type': 'resource_use_end',
-                    'unit': 'ward',
-                    'severity': self.severity,
-                    'time': self.env.now
-                })
+            self.full_event_log.append({
+                'patient': self.identifier,
+                'event': 'ward_discharge',
+                'event_type': 'resource_use_end',
+                'resource': 'ward_beds',
+                'resource_id': ward_bed["id"],
+                'unit': 'ward',
+                'wait_time': self.wait_ward,
+                'severity': self.severity,
+                'time': self.env.now
+            })
+
+            # 🔁 Release the bed back into pool
+            ward_bed["busy"] = False
+            self.args.ward_beds.release(ward_bed)
+
 
         # ===>
         # ICU
@@ -811,37 +808,48 @@ class TraumaPathway:
             icu_request_time = self.env.now
 
             self.full_event_log.append({
-                    'patient': self.identifier,
-                    'pathway': 'Trauma',
-                    'event': 'TRAUMA_icu_wait_begins',
-                    'event_type': 'queue',
-                    'time': icu_request_time
-                })
+                'patient': self.identifier,
+                'pathway': 'Trauma',
+                'event': 'TRAUMA_icu_wait_begins',
+                'event_type': 'queue',
+                'time': icu_request_time
+            })
 
-            with self.args.icu_beds.request() as req:
-                yield req
-                self.wait_icu = self.env.now - icu_request_time
-                self.full_event_log.append({
-                    'patient': self.identifier,
-                    'event': 'icu_admission',
-                    'event_type': 'resource_use',
-                    'unit': 'icu',
-                    'severity': self.severity,
-                    'time': self.env.now
-                })
+            # 🔁 Get an ICU bed (from IdentifiedResource)
+            icu_bed = yield self.args.icu_beds.request()
+            icu_bed["busy"] = True
+            self.wait_icu = self.env.now - icu_request_time
 
-                los = self.args.icu_los.get(self.severity, 3000)
-                self.icu_duration = los
-                yield self.env.timeout(self.icu_duration)
+            self.full_event_log.append({
+                'patient': self.identifier,
+                'event': 'icu_admission',
+                'event_type': 'resource_use',
+                'resource': 'icu_beds',
+                'resource_id': icu_bed["id"],  # ✅ this enables animation
+                'unit': 'icu',
+                'severity': self.severity,
+                'time': self.env.now
+            })
 
-                self.full_event_log.append({
-                    'patient': self.identifier,
-                    'event': 'icu_discharge',
-                    'event_type': 'resource_use_end',
-                    'unit': 'icu',
-                    'severity': self.severity,
-                    'time': self.env.now
-                })
+            los = self.args.icu_los.get(self.severity, 3000)
+            self.icu_duration = los
+            yield self.env.timeout(self.icu_duration)
+
+            self.full_event_log.append({
+                'patient': self.identifier,
+                'event': 'icu_discharge',
+                'event_type': 'resource_use_end',
+                'resource': 'icu_beds',
+                'resource_id': icu_bed["id"],
+                'unit': 'icu',
+                'wait_time': self.wait_icu,
+                'severity': self.severity,
+                'time': self.env.now
+            })
+
+            # 🔁 Release the bed back to pool
+            icu_bed["busy"] = False
+            self.args.icu_beds.release(icu_bed)
 
         # ===>
         # DIRECT DIS
@@ -1004,6 +1012,7 @@ class NonTraumaPathway(object):
                 'event_type': 'resource_use_end',
                 'event': 'triage_complete',
                 'time': self.env.now,
+                'wait_time': self.wait_triage,
                 'resource_id': triage_resource.id_attribute}
         )
 
@@ -1066,6 +1075,7 @@ class NonTraumaPathway(object):
                 'event': 'MINORS_registration_complete',
                 'event_type': 'resource_use_end',
                 'time': self.env.now,
+                'wait_time': self.wait_reg,
                 'resource_id': registration_resource.id_attribute}
         )
         # Resource is no longer in use, so put it back in the store
@@ -1130,6 +1140,7 @@ class NonTraumaPathway(object):
                 'event': 'MINORS_examination_complete',
                 'event_type': 'resource_use_end',
                 'time': self.env.now,
+                'wait_time': self.wait_exam,
                 'resource_id': examination_resource.id_attribute}
         )
         # Resource is no longer in use, so put it back in
@@ -1203,6 +1214,7 @@ class NonTraumaPathway(object):
                     'event': 'MINORS_treatment_ends',
                     'event_type': 'resource_use_end',
                     'time': self.env.now,
+                    'wait_time': self.wait_treat,
                     'resource_id': non_trauma_treatment_resource.id_attribute}
             )
 
@@ -1240,34 +1252,40 @@ class NonTraumaPathway(object):
                     'pathway': 'Non-Trauma',
                     'event': 'MINORS_icu_wait_begins',
                     'event_type': 'queue',
+                    'time': icu_request_time
+                })
+
+                icu_bed = yield self.args.icu_beds.request()
+                icu_bed["busy"] = True
+                self.wait_icu = self.env.now - icu_request_time
+
+                self.full_event_log.append({
+                    'patient': self.identifier,
+                    'pathway': 'Non-Trauma',
+                    'event': 'icu_admission',
+                    'event_type': 'resource_use',
+                    'resource': 'icu_beds',
+                    'resource_id': icu_bed["id"],  # ✅ animation-compatible
                     'time': self.env.now
                 })
 
-                with self.args.icu_beds.request() as req:
-                    yield req
+                los = self.args.icu_los.get(self.severity, 3000.0)
+                self.icu_duration = los
+                yield self.env.timeout(self.icu_duration)
 
-                    self.wait_icu = self.env.now - icu_request_time
-                    self.full_event_log.append({
-                        'patient': self.identifier,
-                        'pathway': 'Non-Trauma',
-                        'event': 'icu_admit_begins',
-                        'event_type': 'resource_use',
-                        'time': self.env.now,
-                        'resource_id': 'icu_bed'
-                    })
+                self.full_event_log.append({
+                    'patient': self.identifier,
+                    'pathway': 'Non-Trauma',
+                    'event': 'icu_discharge',
+                    'event_type': 'resource_use_end',
+                    'resource': 'icu_beds',
+                    'resource_id': icu_bed["id"],
+                    'time': self.env.now,
+                    'wait_time': self.wait_icu
+                })
 
-                    los = self.args.icu_los.get(self.severity, 3000.0)  # in minutes
-                    self.icu_duration = los
-                    yield self.env.timeout(self.icu_duration)
-
-                    self.full_event_log.append({
-                        'patient': self.identifier,
-                        'pathway': 'Non-Trauma',
-                        'event': 'icu_discharge',
-                        'event_type': 'resource_use_end',
-                        'time': self.env.now,
-                        'resource_id': 'icu_bed'
-                    })
+                icu_bed["busy"] = False
+                self.args.icu_beds.release(icu_bed)
 
             # =========================
             # Ward Branch
@@ -1280,34 +1298,40 @@ class NonTraumaPathway(object):
                     'pathway': 'Non-Trauma',
                     'event': 'MINORS_ward_wait_begins',
                     'event_type': 'queue',
+                    'time': ward_request_time
+                })
+
+                ward_bed = yield self.args.ward_beds.request()
+                ward_bed["busy"] = True
+                self.wait_ward = self.env.now - ward_request_time
+
+                self.full_event_log.append({
+                    'patient': self.identifier,
+                    'pathway': 'Non-Trauma',
+                    'event': 'ward_admission',
+                    'event_type': 'resource_use',
+                    'resource': 'ward_beds',
+                    'resource_id': ward_bed["id"],  # ✅ numeric for animation
                     'time': self.env.now
                 })
 
-                with self.args.ward_beds.request() as req:
-                    yield req
-                    self.wait_ward = self.env.now - ward_request_time
+                los = self.args.ward_los.get(self.severity, 2000.0)
+                self.ward_duration = los
+                yield self.env.timeout(self.ward_duration)
 
-                    self.full_event_log.append({
-                        'patient': self.identifier,
-                        'pathway': 'Non-Trauma',
-                        'event': 'ward_admit_begins',
-                        'event_type': 'resource_use',
-                        'time': self.env.now,
-                        'resource_id': 'ward_bed'
-                    })
+                self.full_event_log.append({
+                    'patient': self.identifier,
+                    'pathway': 'Non-Trauma',
+                    'event': 'ward_discharge',
+                    'event_type': 'resource_use_end',
+                    'resource': 'ward_beds',
+                    'resource_id': ward_bed["id"],
+                    'time': self.env.now,
+                    'wait_time': self.wait_ward
+                })
 
-                    los = self.args.ward_los.get(self.severity, 2000.0)  # in minutes
-                    self.ward_duration = los
-                    yield self.env.timeout(self.ward_duration)
-
-                    self.full_event_log.append({
-                        'patient': self.identifier,
-                        'pathway': 'Non-Trauma',
-                        'event': 'ward_discharge',
-                        'event_type': 'resource_use_end',
-                        'time': self.env.now,
-                        'resource_id': 'ward_bed'
-                    })
+                ward_bed["busy"] = False
+                self.args.ward_beds.release(ward_bed)
 
             # =========================
             # Direct Discharge
@@ -1456,10 +1480,8 @@ class TreatmentCentreModel:
         # ICU and ward beds
         # ==========================================
             
-
-
-        self.args.ward_beds = simpy.Resource(self.env, capacity=self.args.n_ward_beds)
-        self.args.icu_beds = simpy.Resource(self.env, capacity=self.args.n_icu_beds)
+        self.args.icu_beds = IdentifiedResource(self.env, self.args.n_icu_beds, name="icu")
+        self.args.ward_beds  = IdentifiedResource(self.env, self.args.n_ward_beds, name="ward")
 
 
 
@@ -1526,31 +1548,44 @@ class TreatmentCentreModel:
 
     def interval_audit_utilisation(self, resources, interval=1):
         while True:
-            # Record time
             if isinstance(resources, list):
-                for i in range(len(resources)):
-                    self.utilisation_audit.append({
-                        'resource_name': resources[i]['resource_name'],
-                        'simulation_time': self.env.now,  # The current simulation time
-                        # The number of users
-                        'number_utilised': len(resources[i]['resource_object'].items),
-                        'number_available': resources[i]['resource_object'].capacity,
-                        # The number of queued processes
-                        # 'number_queued': len(resources[i]['resource_object'].queue),
-                    })
+                for res in resources:
+                    res_obj = res['resource_object']
+                    res_name = res['resource_name']
 
-            else:
-                self.utilisation_audit.append({
-                    # 'simulation_time': resource._env.now,
-                    'simulation_time': self.env.now,  # The current simulation time
-                    'number_utilised': len(resources.items),  # The number of users
-                    'number_available': resources.capacity,
-                    # The number of queued processes
-                    # 'number_queued': len(resources.queue),
-                })
+                    # For IdentifiedResource (like ICU/Ward)
+                    if hasattr(res_obj, 'store'):
+                        units = res_obj.store.items
+                        in_use = sum(unit["busy"] for unit in units)
+                        capacity = len(units)
+                        queue_len = max(0, capacity - in_use)  # No queue in this system
 
-            # Trigger next audit after interval
+                        self.utilisation_audit.append({
+                            'resource_name': res_name,
+                            'simulation_time': self.env.now,
+                            'number_utilised': in_use,
+                            'number_available': capacity,
+                            'number_queued': 0
+                        })
+
+                    # For SimPy Store-based CustomResources (Triage, etc.)
+                    elif isinstance(res_obj, simpy.Store):
+                        total = len(res_obj.items)
+                        in_use = sum(getattr(x, 'busy', False) for x in res_obj.items)
+                        capacity = total
+                        queue_len = 0  # No explicit queue available from Store
+
+                        self.utilisation_audit.append({
+                            'resource_name': res_name,
+                            'simulation_time': self.env.now,
+                            'number_utilised': in_use,
+                            'number_available': capacity,
+                            'number_queued': queue_len
+                        })
+
             yield self.env.timeout(interval)
+
+
 
     def arrivals_generator(self):
         ''' 
@@ -1617,25 +1652,37 @@ class TreatmentCentreModel:
 
 
     def get_overall_weighted_wait_time(self):
-        """Returns a weighted average of wait times across stages."""
+        """Weighted average wait, scaled separately for ICU/Ward"""
         weights = {
-            "wait_triage": 0.4,
-            "wait_reg": 0.2,
-            "wait_exam": 0.2,
-            "wait_treat": 0.2
+            "wait_triage": 0.3,
+            "wait_reg": 0.15,
+            "wait_exam": 0.15,
+            "wait_treat": 0.2,
+            # ICU/Ward with smaller, controlled impact
+            "wait_icu": 0.1,
+            "wait_ward": 0.1
         }
 
         total_weighted = 0.0
-        count = 0
-        for patient in self.trauma_patients + self.non_trauma_patients:
-            for key, weight in weights.items():
-                if hasattr(patient, key):
-                    val = getattr(patient, key)
-                    if val is not None:
-                        total_weighted += val * weight
-                        count += weight
+        total_weight = 0.0
+        patients = self.trauma_patients + self.non_trauma_patients
 
-        return total_weighted / count if count > 0 else 0.0
+        for patient in patients:
+            for key, weight in weights.items():
+                val = getattr(patient, key, None)
+                if val is not None and val > 0:
+                    # Special scale-down for ICU and Ward waits
+                    if key in ["wait_icu", "wait_ward"]:
+                        scaled_val = min(val / 1000.0, 1.0)  # Clipped to max 1
+                    else:
+                        scaled_val = val / 120.0  # normalized by typical max ED wait (~120 mins)
+
+                    total_weighted += scaled_val * weight
+                    total_weight += weight
+
+        return total_weighted / total_weight if total_weight > 0 else 0.0
+
+
 
 
 import numpy as np
@@ -1663,6 +1710,8 @@ class SimulationSummary:
         self._compute_bottleneck_metrics()
 
     def _compute_bottleneck_metrics(self):
+        print(f"[DEBUG] recomputing bottlenecks at t={self.model.env.now}")
+
         units = ['triage', 'registration', 'exam', 'trauma',
                  'cubicle_1', 'cubicle_2', 'ward', 'icu']
         usage = {u: 0 for u in units}
@@ -1789,6 +1838,8 @@ class SimulationSummary:
                 "10b_ward_LOS": self.get_mean_metric("ward_duration", all_pts),
                 "11a_icu_wait": self.get_mean_metric("wait_icu", all_pts),
                 "11b_icu_LOS": self.get_mean_metric("icu_duration", all_pts),
+                "12a_ward_util": self.get_resource_util("ward_duration", self.args.n_ward_beds, all_pts),
+                "12b_icu_util": self.get_resource_util("icu_duration", self.args.n_icu_beds, all_pts),
             }
 
     def summary_frame(self):
@@ -1797,7 +1848,6 @@ class SimulationSummary:
             "avg_fatigue": self.avg_fatigue,
             "total_discharged": self.total_discharged,
             "plan_to_load_error": self.plan_to_load_error,
-            **{f'util_{k}': v for k, v in self.utilization.items()},
             **{f'q_{k}': v for k, v in self.queue_lengths.items()},
             **self.results
         }])
@@ -1907,6 +1957,8 @@ class SimulationSummary:
                 '10b_ward_util': self.get_resource_util('ward_duration', self.args.n_ward_beds, patients),
                 '11a_icu_wait': self.get_mean_metric('wait_icu', patients),
                 '11b_icu_util': self.get_resource_util('icu_duration', self.args.n_icu_beds, patients),
+                "12a_ward_util": self.get_resource_util("ward_duration", self.args.n_ward_beds, patients),
+                "12b_icu_util": self.get_resource_util("icu_duration", self.args.n_icu_beds, patients),
             }
 
 
@@ -1957,6 +2009,7 @@ def single_run(scenario, rc_period=DEFAULT_RESULTS_COLLECTION_PERIOD,
 
     # run results
     summary = SimulationSummary(model)
+    summary.process_run_results()  
 
     if return_detailed_logs:
         return {
@@ -2429,6 +2482,7 @@ class SimplePathway(object):
                 'event': 'treatment_complete',
                 'event_type': 'resource_use_end',
                 'time': self.env.now,
+                'wait_time': self.wait_treat,
                 'resource_id': treatment_resource.id_attribute}
         )
     
@@ -2542,6 +2596,20 @@ class TreatmentCentreModelSimpleBranchedPathway:
 
         # store rc perio
         self.rc_period = results_collection_period
+
+        util_resources = [
+            {'resource_object': self.args.triage, 'resource_name': 'triage'},
+            {'resource_object': self.args.registration, 'resource_name': 'registration'},
+            {'resource_object': self.args.exam, 'resource_name': 'exam'},
+            {'resource_object': self.args.trauma, 'resource_name': 'trauma'},
+            {'resource_object': self.args.cubicle_1, 'resource_name': 'cubicle_1'},
+            {'resource_object': self.args.cubicle_2, 'resource_name': 'cubicle_2'},
+            {'resource_object': self.args.ward_beds, 'resource_name': 'ward_beds'},  # ✅ NEW
+            {'resource_object': self.args.icu_beds, 'resource_name': 'icu_beds'}     # ✅ NEW
+        ]
+
+        self.env.process(self.interval_audit_utilisation(util_resources, interval=30))
+
 
         # run
         self.env.run(until=results_collection_period)
@@ -2708,6 +2776,7 @@ class SimpleBranchedPathway(object):
                 'event': 'examination_complete',
                 'event_type': 'resource_use_end',
                 'time': self.env.now,
+                'wait_time': self.wait_exam,
                 'resource_id': examination_resource.id_attribute}
         )
 
@@ -2775,6 +2844,7 @@ class SimpleBranchedPathway(object):
                     'event': 'treatment_ends',
                     'event_type': 'resource_use_end',
                     'time': self.env.now,
+                    'wait_time': self.wait_treat,
                     'resource_id': non_trauma_treatment_resource.id_attribute}
             )
 

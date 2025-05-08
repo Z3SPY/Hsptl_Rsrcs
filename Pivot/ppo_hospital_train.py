@@ -1,13 +1,19 @@
-# ppo_hospital_train.py (Final, Plug-and-Play Version)
-
-from stable_baselines3 import PPO
-from stable_baselines3.common.vec_env import DummyVecEnv
-from hospital_env import HospitalSimEnv
-import numpy as np
-import csv
 import os
+import numpy as np
+from stable_baselines3 import PPO
 
-# Base simulation config
+from stable_baselines3.common.vec_env import SubprocVecEnv, VecNormalize, VecMonitor
+
+from hospital_env import HospitalSimEnv
+
+# ─── Config ─────────────────────────────────────────────────────────
+NUM_ENVS         = 4
+SEED             = 42
+TOTAL_TIMESTEPS  = 100_000
+TB_LOG_DIR       = "./ppo_hospital_tensorboard/"
+MODEL_PATH       = "ppo_hospital_final.zip"
+NORMALIZER_PATH  = "vecnormalize_stats.pkl"
+
 default_sim_config = {
     "n_triage": 2,
     "n_reg": 2,
@@ -16,106 +22,73 @@ default_sim_config = {
     "n_cubicles_1": 3,
     "n_cubicles_2": 2,
     "random_number_set": 1,
-    'n_icu': 5,
-    'n_ward': 10,
+    "n_icu": 5,
+    "n_ward": 10,
     "prob_trauma": 0.12,
 }
 
-# Environment factory
-def make_env():
-    return HospitalSimEnv(sim_config=default_sim_config, step_size=15, rc_period=40320, cost_mode='diverse')
+# ─── 1) Environment builder ──────────────────────────────────────────
+def build_vec_env(num_envs, seed):
+    def make_env(rank):
+        def _init():
+            env = HospitalSimEnv(default_sim_config)
+            env.seed(seed + rank)
+            return env
+        return _init
 
-# Wrap environment
-env = DummyVecEnv([make_env])
+    # 1) create a SubprocVecEnv of raw envs
+    env_fns = [make_env(i) for i in range(num_envs)]
+    vec_env = SubprocVecEnv(env_fns)
 
-# PPO Model
-model = PPO(
-    policy="MlpPolicy",
-    env=env,
-    learning_rate=3e-4,
-    n_steps=2048,
-    batch_size=64,
-    n_epochs=10,
-    gamma=0.995,
-    gae_lambda=0.95,
-    clip_range=0.2,
-    ent_coef=0.01,
-    verbose=1,
-    tensorboard_log="./ppo_hospital_tensorboard/"
+    # 2) normalize observations & rewards during training
+    vec_env = VecNormalize(
+        vec_env,
+        norm_obs=True,
+        norm_reward=True,
+        clip_obs=10.0,
+        clip_reward=10.0,
+        training=True,    # must be True for learning
+        epsilon=1e-8,
+    )
+
+    # 3) wrap in VecMonitor so ep_rew_mean is logged
+    vec_env = VecMonitor(vec_env)
+
+    return vec_env
+# ─── 2) PPO hyperparameters for one-shift horizon ───────────────────
+ppo_kwargs = dict(
+    policy         = "MlpPolicy",
+    learning_rate  = 1e-4,
+    n_steps        = 512,     # shorter rollout
+    batch_size     = 128,
+    n_epochs       = 10,
+    gamma          = 0.90,    # match 8h shift
+    gae_lambda     = 0.92,
+    clip_range     = 0.2,
+    ent_coef       = 0.01,
+    vf_coef        = 0.2,     # lower critic weight
+    verbose        = 1,
+    tensorboard_log= TB_LOG_DIR,
+    seed           = SEED,
 )
 
-# Training control 
-csv_file = "ppo_hospital_training_log.csv"
-log_interval = 5000
-total_timesteps = 6000
-sim_env = env.envs[0]
+def main():
+    # Build the training env
+    train_env = build_vec_env(NUM_ENVS, SEED)
 
-# Setup CSV
-csv_header = [
-    "timesteps",
-    "sim_time_minutes",
-    "avg_reward",
-    "avg_triage_wait",
-    "avg_registration_wait",
-    "avg_exam_wait",
-    "avg_trauma_wait",
-    "avg_non_trauma_treat_wait",
-    "avg_trauma_treat_wait",
-    "avg_fatigue",
-    "avg_throughput"
-]
-if not os.path.exists(csv_file):
-    with open(csv_file, mode='w', newline='') as f:
-        writer = csv.writer(f)
-        writer.writerow(csv_header)
+    # Instantiate the PPO model
+    model = PPO(env=train_env, **ppo_kwargs)
 
-# Train Loop
-steps_so_far = 0
-while steps_so_far < total_timesteps:
-    model.learn(total_timesteps=log_interval, reset_num_timesteps=False)
-    steps_so_far += log_interval
+    # Train
+    model.learn(total_timesteps=TOTAL_TIMESTEPS, reset_num_timesteps=False)
 
-    # Calculate averages
-    avg_reward = np.mean(sim_env.cumulative_rewards) if sim_env.cumulative_rewards else 0.0
-    avg_triage_wait = np.mean(sim_env.cumulative_triage_waits) if sim_env.cumulative_triage_waits else 0.0
-    avg_registration_wait = np.mean(sim_env.cumulative_registration_waits) if sim_env.cumulative_registration_waits else 0.0
-    avg_exam_wait = np.mean(sim_env.cumulative_exam_waits) if sim_env.cumulative_exam_waits else 0.0
-    avg_trauma_wait = np.mean(sim_env.cumulative_trauma_waits) if sim_env.cumulative_trauma_waits else 0.0
-    avg_cub1_wait = np.mean(sim_env.cumulative_cub1_waits) if sim_env.cumulative_cub1_waits else 0.0
-    avg_cub2_wait = np.mean(sim_env.cumulative_cub2_waits) if sim_env.cumulative_cub2_waits else 0.0
-    avg_fatigue = np.mean(sim_env.cumulative_fatigues) if sim_env.cumulative_fatigues else 0.0
-    avg_throughput = np.mean(sim_env.cumulative_throughput) if sim_env.cumulative_throughput else 0.0
+    # Save model and normalizer
+    model.save(MODEL_PATH)
+    train_env.save(NORMALIZER_PATH)
+    train_env.close()
 
-    # Log to CSV
-    with open(csv_file, mode='a', newline='') as f:
-        writer = csv.writer(f)
-        writer.writerow([
-            steps_so_far,
-            sim_env.current_time,
-            avg_reward,
-            avg_triage_wait,
-            avg_registration_wait,
-            avg_exam_wait,
-            avg_trauma_wait,
-            avg_cub1_wait,
-            avg_cub2_wait,
-            avg_fatigue,
-            avg_throughput
-        ])
+    print(f"[DONE] Model saved to {MODEL_PATH}")
+    print(f"[DONE] Normalizer stats saved to {NORMALIZER_PATH}")
 
-    # Reset internal trackers
-    sim_env.cumulative_rewards.clear()
-    sim_env.cumulative_triage_waits.clear()
-    sim_env.cumulative_registration_waits.clear()
-    sim_env.cumulative_exam_waits.clear()
-    sim_env.cumulative_trauma_waits.clear()
-    sim_env.cumulative_cub1_waits.clear()
-    sim_env.cumulative_cub2_waits.clear()
-    sim_env.cumulative_fatigues.clear()
-    sim_env.cumulative_throughput.clear()
-
-    print(f"[INFO] Logged at {steps_so_far} timesteps!")
-
-# Final Save
-model.save("ppo_hospital_final")
-print("[DONE] Model saved.")
+if __name__ == "__main__":
+    main()
