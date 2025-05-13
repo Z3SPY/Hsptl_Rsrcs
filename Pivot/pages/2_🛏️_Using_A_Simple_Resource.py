@@ -1,10 +1,4 @@
-'''
-A Streamlit application based on the open treatment centre simulation model from Monks.T, Harper.A, Anagnoustou. A, Allen.M, Taylor.S. (2022)
 
-Original Model: https://github.com/TomMonks/treatment-centre-sim/tree/main
-
-Allows users to interact with an increasingly complex treatment simulation
-'''
 import asyncio
 import gc
 import pandas as pd
@@ -13,7 +7,7 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from helper_functions import add_logo, mermaid, center_running
-from model_classes import Scenario, multiple_replications
+from modelclasses import Scenario, multiple_replications
 from distribution_classes import Normal
 from output_animation_functions import reshape_for_animations, generate_animation_df, generate_animation
 # Set page parameters

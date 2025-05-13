@@ -37,7 +37,7 @@ TRANSFERS_PATH   = "unused/transfers.csv/transfers.csv"
 PATIENTS_PATH    = "unused/patients.csv/patients.csv"
 MAX_LOS_H        = 30 * 24    # 30 days in hours
 TRIM_PCT         = 0.99       # 99th percentile trim for inter-arrival
-TARGET_DAILY_AVG = 70        # desired average arrivals per day
+TARGET_DAILY_AVG = 40        # desired average arrivals per day
 
 
 def summary(series: pd.Series) -> dict:

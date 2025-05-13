@@ -22,7 +22,7 @@ class Discrete:
 from distribution_classes import (
     Exponential, Normal, Uniform, Bernoulli, Lognormal)
 
-# Constants and defaults for modelling **as-is**
+# Constants and defaults for modelling *as-is*
 
 # Distribution parameters
 
@@ -156,6 +156,8 @@ class CustomResource(simpy.Resource):
         self.fatigue = 0.0
         self.time_on_shift = 0.0
         self.busy = False 
+        self.on_shift = True  # NEW
+
 
     def request(self, *args, **kwargs):
         # Add logic to handle the ID attribute when a request is made
@@ -185,6 +187,10 @@ class IdentifiedResource:
         unit["busy"] = False
         self.store.put(unit)
 
+def queue_len(res: 'IdentifiedResource'):
+    """Return number of GET events waiting on an IdentifiedResource."""
+    return len(res.store.get_queue)
+
 
 
 class Scenario:
@@ -212,75 +218,10 @@ class Scenario:
                  prob_trauma=DEFAULT_PROB_TRAUMA,
                  override_arrival_rate=OVERRIDE_ARRIVAL_RATE,
                  manual_arrival_rate=MANUAL_ARRIVAL_RATE_VALUE,
-                 model="full"
+                 model="full",
+                 rc_period=10080
                  ):
-        '''
-        Create a scenario to parameterise the simulation model
-
-        Parameters:
-        -----------
-        random_number_set: int, optional (default=DEFAULT_RNG_SET)
-            Set to control the initial seeds of each stream of pseudo
-            random numbers used in the model.
-
-        n_triage: int
-            The number of triage cubicles
-
-        n_reg: int
-            The number of registration clerks
-
-        n_exam: int
-            The number of examination rooms
-
-        n_trauma: int
-            The number of trauma bays for stablisation
-
-        n_cubicles_1: int
-            The number of non-trauma treatment cubicles
-
-        n_cubicles_2: int
-            The number of trauma treatment cubicles
-
-        triage_mean: float
-            Mean duration of the triage distribution (Exponential)
-
-        reg_mean: float
-            Mean duration of the registration distribution (Lognormal)
-
-        reg_var: float
-            Variance of the registration distribution (Lognormal)
-
-        exam_mean: float
-            Mean of the examination distribution (Normal)
-
-        exam_var: float
-            Variance of the examination distribution (Normal)
-
-        trauma_mean: float
-            Mean of the trauma stabilisation distribution (Exponential)
-
-        trauma_treat_mean: float
-            Mean of the trauma cubicle treatment distribution (Lognormal)
-
-        trauma_treat_var: float
-            Variance of the trauma cubicle treatment distribution (Lognormal)
-
-        non_trauma_treat_mean: float
-            Mean of the non trauma treatment distribution
-
-        non_trauma_treat_var: float
-            Variance of the non trauma treatment distribution
-
-        non_trauma_treat_p: float
-            Probability non trauma patient requires treatment
-
-        prob_trauma: float
-            probability that a new arrival is a trauma patient.
-
-        model: string
-            What model to run. Default is full. 
-            Options are "full", "simplest", "simple_with_branch"
-        '''
+       
         # sampling
         self.random_number_set = random_number_set
 
@@ -300,6 +241,8 @@ class Scenario:
         self.manual_arrival_rate = manual_arrival_rate
         self.override_arrival_rate = override_arrival_rate
         self.model = model
+        self.rc_period = rc_period # Define time period
+
 
         self.init_sampling()
 
@@ -324,32 +267,21 @@ class Scenario:
 
         # =================================     
         
-        
 
 
     def set_random_no_set(self, random_number_set):
-        '''
-        Controls the random sampling 
-        Parameters:
-        ----------
-        random_number_set: int
-            Used to control the set of psuedo random numbers
-            used by the distributions in the simulation.
-        '''
+
         self.random_number_set = random_number_set
         self.init_sampling()
 
     def init_resource_counts(self, n_triage, n_reg, n_exam, n_trauma,
                              n_cubicles_1, n_cubicles_2, n_icu, n_ward):
-        '''
-        Init the counts of resources to default values...
-        '''
+
         self.n_triage = n_triage
         self.n_reg = n_reg
         self.n_exam = n_exam
         self.n_trauma = n_trauma
 
-        # non-trauma (1), trauma (2) treatment cubicles
         self.n_cubicles_1 = n_cubicles_1
         self.n_cubicles_2 = n_cubicles_2
 
@@ -357,10 +289,7 @@ class Scenario:
         self.n_icu_beds=n_icu
 
     def init_sampling(self):
-        '''
-        Create the distributions used by the model and initialise 
-        the random seeds of each.
-        '''
+
         # create random number streams
         rng_streams = np.random.default_rng(self.random_number_set)
         self.seeds = rng_streams.integers(0, 999999999, size=N_STREAMS)
@@ -371,11 +300,13 @@ class Scenario:
         self.triage_dist = Exponential(self.triage_mean,
                                        random_seed=self.seeds[0])
     
+    
         # Registration duration (non-trauma only)
         self.reg_dist = Lognormal(self.reg_mean,
                                   np.sqrt(self.reg_var),
                                   random_seed=self.seeds[1])
 
+        # Examination duration (non-trauma only)
         # Examination duration (non-trauma only)
         self.exam_dist = Normal(self.exam_mean,
                                 np.sqrt(self.exam_var),
@@ -395,6 +326,10 @@ class Scenario:
                                     np.sqrt(self.non_trauma_treat_var),
                                     random_seed=self.seeds[5])
 
+
+        # =================================
+        # Service Type Distributions
+        # =================================
 
         # =================================
         # Service Type Distributions
@@ -462,7 +397,7 @@ def release_resource(self, resource, resource_type):
     self.log_event('resource_use_end', f'{resource_type}_complete', resource.id_attribute)
 
 def log_event(self, event_type, event, resource_id=None):
-    """Helper method to log events to `self.full_event_log`"""
+    """Helper method to log events to self.full_event_log"""
     self.full_event_log.append({
         'patient': self.identifier,
         'pathway': self.__class__.__name__,
@@ -566,8 +501,17 @@ class TraumaPathway:
         # ================================================
 
         waiting_time_start = self.env.now
-        triage_resource = yield self.args.triage.get()
-        triage_resource.busy = True
+
+        # Template
+        while True:
+            triage_resource = yield self.args.triage.get()
+            if getattr(triage_resource, "on_shift", True):
+                triage_resource.busy = True
+                break
+            else:
+                self.args.triage.put(triage_resource)
+                yield self.env.timeout(1) 
+        
 
 
 
@@ -587,9 +531,14 @@ class TraumaPathway:
             }
         )
 
-        # sample triage duration.
-        self.triage_duration = self.args.triage_dist.sample()
-        yield self.env.timeout(self.triage_duration)
+
+        # sample examination duration and apply fatigue slowdown
+        base = self.args.triage_dist.sample()
+        fatigue = triage_resource.fatigue   # or whichever variable holds the resource
+        slowdown = 1.0 + (fatigue / 100.0)
+        self.treat_duration = base * slowdown
+        yield self.env.timeout(self.treat_duration)
+
         
         trace(f'triage {self.identifier} complete {self.env.now:.3f}; '
               f'waiting time was {self.wait_triage:.3f}')
@@ -628,8 +577,16 @@ class TraumaPathway:
 
         # request trauma room
         waiting_time_start = self.env.now
-        trauma_resource = yield self.args.trauma.get()
-        trauma_resource.busy = True
+        while True:
+            trauma_resource = yield self.args.trauma.get()
+            if getattr(trauma_resource, "on_shift", True):
+                trauma_resource.busy = True
+                break
+            else:
+                self.args.trauma.put(trauma_resource)
+                yield self.env.timeout(1)
+    
+        
 
         # record the waiting time for trauma
         self.wait_trauma =  self.env.now - waiting_time_start
@@ -648,9 +605,15 @@ class TraumaPathway:
 
         
 
-        # sample stablisation duration.
-        self.trauma_duration = self.args.trauma_dist.sample()
-        yield self.env.timeout(self.trauma_duration)
+  
+
+        # sample examination duration and apply fatigue slowdown
+        base =  self.args.trauma_dist.sample()
+        fatigue = trauma_resource.fatigue   # or whichever variable holds the resource
+        slowdown = 1.0 + (fatigue / 100.0)
+        self.treat_duration = base * slowdown
+        yield self.env.timeout(self.treat_duration)
+
 
         trace(f'stabilisation of patient {self.identifier} at '
               f'{self.env.now:.3f}')
@@ -691,8 +654,16 @@ class TraumaPathway:
         # request treatment cubicle
         waiting_time_start = self.env.now
 
-        trauma_treatment_resource = yield self.args.cubicle_2.get()
-        trauma_treatment_resource.busy = True
+        while True:
+            trauma_treatment_resource = yield self.args.cubicle_2.get()
+            if getattr(trauma_treatment_resource, "on_shift", True):
+                trauma_treatment_resource.busy = True
+                break
+            else:
+                self.args.cubicle_2.put(trauma_treatment_resource)
+                yield self.env.timeout(1)
+
+        
 
         # record the waiting time for trauma
         self.wait_treat =self.env.now - waiting_time_start
@@ -711,9 +682,15 @@ class TraumaPathway:
                 }
         )
 
-        # sample treatment duration.
-        self.treat_duration = self.args.trauma_dist.sample()
+ 
+
+         # sample examination duration and apply fatigue slowdown
+        base =  self.args.trauma_dist.sample()
+        fatigue = trauma_treatment_resource.fatigue   # or whichever variable holds the resource
+        slowdown = 1.0 + (fatigue / 100.0)
+        self.treat_duration = base * slowdown
         yield self.env.timeout(self.treat_duration)
+
 
         trace(f'patient {self.identifier} treatment complete {self.env.now:.3f}; '
               f'waiting time was {self.wait_treat:.3f}')
@@ -736,7 +713,7 @@ class TraumaPathway:
         # ================================================
 
         # Determine next unit
-        # Assume `self.severity` has been sampled in __init__ or earlier in execute
+        # Assume self.severity has been sampled in _init_ or earlier in execute
 
         if self.severity not in self.args.unit_transition_probs:
             print(f"[WARNING] Severity {self.severity} not in transitions; defaulting to discharge.")
@@ -746,6 +723,7 @@ class TraumaPathway:
             destination = random.choices(['icu', 'ward', 'discharge'], weights=probs)[0]
 
         # Discharge Log
+        
         
 
         # ===>
@@ -758,7 +736,7 @@ class TraumaPathway:
             self.full_event_log.append({
                 'patient': self.identifier,
                 'pathway': 'Trauma',
-                'event': 'TRAUMA_ward_wait_begins',
+                'event': 'ward_wait_begins',
                 'event_type': 'queue',
                 'time': ward_request_time
             })
@@ -810,7 +788,7 @@ class TraumaPathway:
             self.full_event_log.append({
                 'patient': self.identifier,
                 'pathway': 'Trauma',
-                'event': 'TRAUMA_icu_wait_begins',
+                'event': 'icu_wait_begins',
                 'event_type': 'queue',
                 'time': icu_request_time
             })
@@ -870,15 +848,14 @@ class TraumaPathway:
 
         #########################################################
 
-
-
-        self.full_event_log.append(
-            {'patient': self.identifier,
-            'pathway': 'Shared',
-            'event': 'depart',
-            'event_type': 'arrival_departure',
-            'time': self.env.now}
-        )
+        self.full_event_log.append({
+                'patient': self.identifier,
+                'pathway': 'Shared',
+                'event': 'direct_discharge',
+                'event_type': 'arrival_departure',
+                'unit': 'discharge',
+                'time': self.env.now
+            })
 
 
         
@@ -982,7 +959,17 @@ class NonTraumaPathway(object):
 
         # request sign-in/triage
         waiting_time_start = self.env.now
-        triage_resource = yield self.args.triage.get()
+
+        # Template
+        while True:
+            triage_resource = yield self.args.triage.get()
+            if getattr(triage_resource, "on_shift", True):
+                triage_resource.busy = True
+                break
+            else:
+                self.args.triage.put(triage_resource)
+                yield self.env.timeout(1)
+
 
         # record the waiting time for triage
         self.wait_triage = self.env.now - waiting_time_start
@@ -1000,9 +987,18 @@ class NonTraumaPathway(object):
                 }
         )
 
-        # sample triage duration.
-        self.triage_duration = self.args.triage_dist.sample()
-        yield self.env.timeout(self.triage_duration)
+ 
+
+        # sample examination duration and apply fatigue slowdown
+        base = self.args.triage_dist.sample()
+        fatigue = triage_resource.fatigue   # or whichever variable holds the resource
+        slowdown = 1.0 + (fatigue / 100.0)
+        self.treat_duration = base * slowdown
+        yield self.env.timeout(self.treat_duration)
+
+        triage_resource.busy = False
+        self.args.triage.put(triage_resource)
+
 
         trace(f'triage {self.identifier} complete {self.env.now:.3f}; '
                 f'waiting time was {self.wait_triage:.3f}')
@@ -1040,8 +1036,18 @@ class NonTraumaPathway(object):
         # request registration clerk
         waiting_time_start = self.env.now
 
-        registration_resource = yield self.args.registration.get()
-        registration_resource.busy = True
+
+        # Template
+        while True:
+            registration_resource = yield self.args.registration.get()
+            if getattr(registration_resource, "on_shift", True):
+                registration_resource.busy = True
+                break
+            else:
+                self.args.registration.put(registration_resource)
+                yield self.env.timeout(1)
+
+        
 
        
 
@@ -1062,9 +1068,14 @@ class NonTraumaPathway(object):
                 }
         )
 
-        # sample registration duration.
-        self.reg_duration = self.args.reg_dist.sample()
-        yield self.env.timeout(self.reg_duration)
+
+        # sample examination duration and apply fatigue slowdown
+        base = self.args.reg_dist.sample()
+        fatigue = registration_resource.fatigue   # or whichever variable holds the resource
+        slowdown = 1.0 + (fatigue / 100.0)
+        self.treat_duration = base * slowdown
+        yield self.env.timeout(self.treat_duration)
+
 
         trace(f'patient {self.identifier} registered at'
                 f'{self.env.now:.3f}; '
@@ -1105,8 +1116,17 @@ class NonTraumaPathway(object):
         # request examination resource
         self.arrival_exam = self.env.now
 
-        examination_resource = yield self.args.exam.get()
-        examination_resource.busy = True
+                # Template
+        while True:
+            examination_resource = yield self.args.exam.get()
+            if getattr(examination_resource, "on_shift", True):
+                examination_resource.busy = True
+                break
+            else:
+                self.args.exam.put(examination_resource)
+                yield self.env.timeout(1)
+
+
 
       
         
@@ -1127,9 +1147,15 @@ class NonTraumaPathway(object):
                 }
         )
 
-        # sample examination duration.
-        self.exam_duration = self.args.exam_dist.sample()
-        yield self.env.timeout(self.exam_duration)
+
+
+        # sample examination duration and apply fatigue slowdown
+        base = self.args.exam_dist.sample()
+        fatigue = examination_resource.fatigue   # or whichever variable holds the resource
+        slowdown = 1.0 + (fatigue / 100.0)
+        self.treat_duration = base * slowdown
+        yield self.env.timeout(self.treat_duration)
+
 
         trace(f'patient {self.identifier} examination complete '
                 f'at {self.env.now:.3f};'
@@ -1144,6 +1170,7 @@ class NonTraumaPathway(object):
                 'resource_id': examination_resource.id_attribute}
         )
         # Resource is no longer in use, so put it back in
+        examination_resource.busy  = False
         self.args.exam.put(examination_resource) 
 
 
@@ -1182,8 +1209,18 @@ class NonTraumaPathway(object):
 
             waiting_time_start = self.env.now
 
-            non_trauma_treatment_resource = yield self.args.cubicle_1.get()
-            non_trauma_treatment_resource.busy = True
+
+                    # Template
+            while True:
+                non_trauma_treatment_resource = yield self.args.cubicle_1.get()
+                if getattr(non_trauma_treatment_resource, "on_shift", True):
+                    non_trauma_treatment_resource.busy = True
+                    break
+                else:
+                    self.args.cubicle_1.put(non_trauma_treatment_resource)
+                    yield self.env.timeout(1)
+                    
+            
 
             # record the waiting time for treatment
             self.wait_treat = self.env.now - waiting_time_start
@@ -1201,9 +1238,13 @@ class NonTraumaPathway(object):
                 }
             )
 
-            # sample treatment duration.
-            self.treat_duration = self.args.nt_treat_dist.sample()
+            # sample examination duration and apply fatigue slowdown
+            base = self.args.nt_treat_dist.sample()
+            fatigue = non_trauma_treatment_resource.fatigue   # or whichever variable holds the resource
+            slowdown = 1.0 + (fatigue / 100.0)
+            self.treat_duration = base * slowdown
             yield self.env.timeout(self.treat_duration)
+
 
             trace(f'patient {self.identifier} treatment complete '
                     f'at {self.env.now:.3f};'
@@ -1250,7 +1291,7 @@ class NonTraumaPathway(object):
                 self.full_event_log.append({
                     'patient': self.identifier,
                     'pathway': 'Non-Trauma',
-                    'event': 'MINORS_icu_wait_begins',
+                    'event': 'icu_wait_begins',
                     'event_type': 'queue',
                     'time': icu_request_time
                 })
@@ -1296,7 +1337,7 @@ class NonTraumaPathway(object):
                 self.full_event_log.append({
                     'patient': self.identifier,
                     'pathway': 'Non-Trauma',
-                    'event': 'MINORS_ward_wait_begins',
+                    'event': 'ward_wait_begins',
                     'event_type': 'queue',
                     'time': ward_request_time
                 })
@@ -1341,7 +1382,7 @@ class NonTraumaPathway(object):
                 self.full_event_log.append(
                     {'patient': self.identifier,
                     'pathway': 'Shared',
-                    'event': 'depart',
+                    'event': 'direct_discharge',
                     'event_type': 'arrival_departure',
                     'time': self.env.now}
                 )
@@ -1357,7 +1398,7 @@ class NonTraumaPathway(object):
         self.full_event_log.append(
             {'patient': self.identifier,
             'pathway': 'Shared',
-            'event': 'depart',
+            'event': 'direct_discharge',
             'event_type': 'arrival_departure',
             'time': self.env.now}
         )
@@ -1371,19 +1412,7 @@ class NonTraumaPathway(object):
 # ================================================
         
 class TreatmentCentreModel:
-    '''
-    The treatment centre model
 
-    Patients arrive at random to a treatment centre, are triaged
-    and then processed in either a trauma or non-trauma pathway.
-
-    The main class that a user interacts with to run the model is 
-    `TreatmentCentreModel`.  This implements a `.run()` method, contains a simple
-    algorithm for the non-stationary poission process for patients arrivals and 
-    inits instances of `TraumaPathway` or `NonTraumaPathway` depending on the 
-    arrival type.    
-
-    '''
 
     def __init__(self, args):
         self.env = simpy.Environment()
@@ -1394,7 +1423,7 @@ class TreatmentCentreModel:
         self.trauma_patients = []
         self.non_trauma_patients = []
 
-        self.rc_period = None
+        self.rc_period = getattr(args, "rc_period", 10080)  
         self.results = None
 
         self.full_event_log = []
@@ -1402,11 +1431,33 @@ class TreatmentCentreModel:
 
         # ADDED 
 
+    def fatigue_sampler(self):
+        while True:
+            for unit_name, unit in {
+                "triage": self.args.triage,
+                "registration": self.args.registration,
+                "exam": self.args.exam,
+                "trauma": self.args.trauma,
+                "cubicle_1": self.args.cubicle_1,
+                "cubicle_2": self.args.cubicle_2
+            }.items():
+                for res in unit.items:
+                    if getattr(res, "on_shift", False):
+                        res.fatigue = min(res.fatigue + 0.1, 100.0)
+
+                        # 🔧 Add fatigue logging here
+                        """self.full_event_log.append({
+                            'event_type': 'fatigue_sample',
+                            'event': f'{unit_name}_fatigue_sample',
+                            'unit': unit_name,
+                            'fatigue': res.fatigue,
+                            'time': self.env.now
+                        })"""
+            yield self.env.timeout(60)
 
 
 
     def init_resources(self):
-
 
         # sign/in triage
         self.args.triage = simpy.Store(self.env)
@@ -1486,27 +1537,11 @@ class TreatmentCentreModel:
 
 
     def run(self, results_collection_period=DEFAULT_RESULTS_COLLECTION_PERIOD):
-        '''
-        Conduct a single run of the model in its current 
-        configuration
 
-
-        Parameters:
-        ----------
-        results_collection_period, float, optional
-            default = DEFAULT_RESULTS_COLLECTION_PERIOD
-
-        warm_up, float, optional (default=0)
-
-            length of initial transient period to truncate
-            from results.
-
-        Returns:
-        --------
-            None
-        '''
         # setup the arrival generator process
+        print("RUNNING")
         self.env.process(self.arrivals_generator())
+        self.env.process(self.fatigue_sampler())
 
         resources_list = [
             {'resource_name': 'registration_clerks',
@@ -1535,16 +1570,6 @@ class TreatmentCentreModel:
 
         # run
         self.env.run(until=results_collection_period)
-
-        # self.utilisation_audit.append(
-
-        #         {'resource': 'triage',
-        #         'time': self.env.now,
-        #         'capacity': self.args.triage.capacity,
-        #         'usage': self.args.triage.count
-        #         }
-
-        #     )
 
     def interval_audit_utilisation(self, resources, interval=1):
         while True:
@@ -1685,9 +1710,6 @@ class TreatmentCentreModel:
 
 
 
-import numpy as np
-import pandas as pd
-
 class SimulationSummary:
     def __init__(self, model):
         self.model = model
@@ -1710,15 +1732,12 @@ class SimulationSummary:
         self._compute_bottleneck_metrics()
 
     def _compute_bottleneck_metrics(self):
-        print(f"[DEBUG] recomputing bottlenecks at t={self.model.env.now}")
-
         units = ['triage', 'registration', 'exam', 'trauma',
-                 'cubicle_1', 'cubicle_2', 'ward', 'icu']
+                'cubicle_1', 'cubicle_2', 'ward', 'icu']
         usage = {u: 0 for u in units}
         queue = {u: 0 for u in units}
         total_wait = 0
         wait_count = 0
-        fatigue_samples = []
 
         for e in self.log:
             etype = e.get("event_type", "")
@@ -1729,20 +1748,22 @@ class SimulationSummary:
                 if u in usage:
                     usage[u] += 1
 
-            elif etype == "queue":
-                u = self._infer_unit(ename)
-                if u in queue:
-                    queue[u] += 1
 
             elif etype == "resource_use_end" and "wait_time" in e:
                 total_wait += e["wait_time"]
                 wait_count += 1
 
-            elif etype == "fatigue_sample" and "fatigue" in e:
-                fatigue_samples.append(e["fatigue"])
-
             elif ename in ["ward_discharge", "icu_discharge", "direct_discharge"]:
                 self.total_discharged += 1
+
+        for u in ['triage', 'registration', 'exam', 'trauma', 'cubicle_1', 'cubicle_2']:
+            store = getattr(self.args, u, None)
+            if store and hasattr(store, 'items'):
+                # This approximates live queue: staff off-shift → patient waits
+                busy = sum(1 for res in store.items if getattr(res, 'busy', False))
+                cap = len(store.items)
+                queue[u] = max(0, cap - busy)  # crude but more grounded than queue+=1
+                
 
         for u in units:
             cap = getattr(self.args, f"n_{u}", 1)
@@ -1750,7 +1771,22 @@ class SimulationSummary:
             self.queue_lengths[u] = queue[u]
 
         self.avg_total_wait_time = total_wait / wait_count if wait_count else 0.0
-        self.avg_fatigue = np.mean(fatigue_samples) if fatigue_samples else 0.0
+
+        # --- LIVE fatigue tracking from SimPy resources ---
+        fatigue_values = []
+        for unit in ['triage', 'registration', 'exam', 'trauma', 'cubicle_1', 'cubicle_2']:
+            store = getattr(self.args, unit, None)
+            if store and hasattr(store, 'items'):
+                for res in store.items:
+                    if hasattr(res, "fatigue"):
+                        fatigue_values.append(res.fatigue)
+
+        self.avg_fatigue = np.mean(fatigue_values) if fatigue_values else 0.0
+
+        # --- Add downstream queue snapshots ---
+        #self.queue_lengths['icu'] = queue_len(self.args.icu_beds)
+        #self.queue_lengths['ward'] = queue_len(self.args.ward_beds)
+
 
     def _infer_unit(self, event_name):
         mapping = {
@@ -1892,7 +1928,7 @@ class SimulationSummary:
         acuity_counts = {i: 0 for i in range(1, 6)}  # 1 - 5 severity levels
         for p in patients:
             acuity_counts[p.severity] += 1
-        print(f"[Acuity Distribution] {acuity_counts}")  # This will print the distribution in the console.
+        #print(f"[Acuity Distribution] {acuity_counts}")  # This will print the distribution in the console.
 
 
         # Now the SAME logic as before based on model type
@@ -1960,6 +1996,12 @@ class SimulationSummary:
                 "12a_ward_util": self.get_resource_util("ward_duration", self.args.n_ward_beds, patients),
                 "12b_icu_util": self.get_resource_util("icu_duration", self.args.n_icu_beds, patients),
             }
+
+            #print(f"[Acuity Distribution] {acuity_counts}") 
+
+
+        self._compute_bottleneck_metrics()
+
 
 
 
@@ -2092,12 +2134,12 @@ def multiple_replications(scenario,
     return df_results
 
 
-# ## Scenario Analysis
+# ## Scenario Analysis
 
 def get_scenarios():
     '''
     Creates a dictionary object containing
-    objects of type `Scenario` to run.
+    objects of type Scenario to run.
 
     Returns:
     --------
@@ -2199,7 +2241,7 @@ class TreatmentCentreModelSimpleNurseStepOnly:
     Patients arrive at random to a treatment centre, see a nurse, then leave.
 
     The main class that a user interacts with to run the model is
-    `TreatmentCentreModel`.  This implements a `.run()` method, contains a simple
+    TreatmentCentreModel.  This implements a .run() method, contains a simple
     algorithm for the non-stationary poission process for patients arrivals and
     inits instances of the nurse pathway.
 
@@ -2449,7 +2491,16 @@ class SimplePathway(object):
         
         waiting_time_start = self.env.now
 
-        treatment_resource = yield self.args.treatment.get()
+
+                # Template
+        while True:
+            treatment_resource = yield self.args.treatment.get()
+            if getattr(treatment_resource, "on_shift", True):
+                treatment_resource.busy = True
+                break
+            else:
+                self.args.treatment.put(treatment_resource)
+                yield self.env.timeout(1)
             
         # record the waiting time for registration
         self.wait_treat = self.env.now - waiting_time_start
@@ -2469,9 +2520,14 @@ class SimplePathway(object):
                 }
         )
 
-        # sample examination duration.
-        self.treat_duration = self.args.treat_dist.sample()
+        # sample examination duration and apply fatigue slowdown
+        base = self.args.treat_dist.sample()
+        fatigue = treatment_resource.fatigue   # or whichever variable holds the resource
+        slowdown = 1.0 + (fatigue / 100.0)
+        self.treat_duration = base * slowdown
         yield self.env.timeout(self.treat_duration)
+
+
 
         trace(f'patient {self.identifier} nurse exam/treatment complete '
                 f'at {self.env.now:.3f};'
@@ -2487,6 +2543,7 @@ class SimplePathway(object):
         )
     
         # Resource is no longer in use, so put it back in
+        treatment_resource.busy = False
         self.args.treatment.put(treatment_resource) 
 
 
@@ -2495,7 +2552,7 @@ class SimplePathway(object):
         self.full_event_log.append(
             {'patient': self.identifier,
             'pathway': 'Simplest',
-            'event': 'depart',
+            'event': 'direct_discharge',
             'event_type': 'arrival_departure',
             'time': self.env.now}
         )
@@ -2516,7 +2573,7 @@ class TreatmentCentreModelSimpleBranchedPathway:
     Patients arrive at random to a treatment centre, see a nurse, then either require treatment or depart the system immediately.
 
     The main class that a user interacts with to run the model is
-    `TreatmentCentreModel`.  This implements a `.run()` method, contains a simple
+    TreatmentCentreModel.  This implements a .run() method, contains a simple
     algorithm for the non-stationary poission process for patients arrivals and
     inits instances of the nurse pathway.
 
@@ -2740,8 +2797,17 @@ class SimpleBranchedPathway(object):
         self.arrival_exam = self.env.now
 
 
-        examination_resource = yield self.args.exam.get()
-        examination_resource.busy = True
+
+         # Template
+        while True:
+            examination_resource = yield self.args.exam.get()
+            if getattr(examination_resource, "on_shift", True):
+                examination_resource.busy = True
+                break
+            else:
+                self.args.exam.put(examination_resource)
+                yield self.env.timeout(1)  # prevent tight loop (important)
+
 
          
 
@@ -2763,9 +2829,13 @@ class SimpleBranchedPathway(object):
                 }
         )
 
-        # sample examination duration.
-        self.exam_duration = self.args.exam_dist.sample()
-        yield self.env.timeout(self.exam_duration)
+        # sample examination duration and apply fatigue slowdown
+        base = self.args.exam_dist.sample()
+        fatigue = examination_resource.fatigue   # or whichever variable holds the resource
+        slowdown = 1.0 + (fatigue / 100.0)
+        self.treat_duration = base * slowdown
+        yield self.env.timeout(self.treat_duration)
+
 
         trace(f'patient {self.identifier} nurse exam/treatment complete '
                 f'at {self.env.now:.3f};'
@@ -2812,8 +2882,18 @@ class SimpleBranchedPathway(object):
             # request treatment cubicle
             waiting_time_start = self.env.now - start_wait
 
-            non_trauma_treatment_resource = yield self.args.treatment.get()
-            non_trauma_treatment_resource.busy = True
+
+                    # Template
+            while True:
+                non_trauma_treatment_resource = yield self.args.treatment.get()
+                if getattr(non_trauma_treatment_resource, "on_shift", True):
+                    non_trauma_treatment_resource.busy = True
+                    break
+                else:
+                    self.args.treatment.put(non_trauma_treatment_resource)
+                    yield self.env.timeout(1) 
+
+
 
             # record the waiting time for treatment
             self.wait_treat = waiting_time_start
@@ -2831,9 +2911,15 @@ class SimpleBranchedPathway(object):
                 }
             )
 
-            # sample treatment duration.
-            self.treat_duration = self.args.nt_treat_dist.sample()
+
+            # sample examination duration and apply fatigue slowdown
+            base =  self.args.nt_treat_dist.sample()
+            fatigue = non_trauma_treatment_resource.fatigue   # or whichever variable holds the resource
+            slowdown = 1.0 + (fatigue / 100.0)
+            self.treat_duration = base * slowdown
             yield self.env.timeout(self.treat_duration)
+
+
 
             trace(f'patient {self.identifier} treatment complete '
                     f'at {self.env.now:.3f};'
@@ -2855,7 +2941,7 @@ class SimpleBranchedPathway(object):
             self.full_event_log.append(
                 {'patient': self.identifier,
                 'pathway': 'simple_with_branch',
-                'event': 'depart',
+                'event': 'direct_discharge',
                 'event_type': 'arrival_departure',
                 'time': self.env.now}
             )
@@ -2869,15 +2955,14 @@ class SimpleBranchedPathway(object):
                  'time': self.env.now}
             )
 
-            self.full_event_log.append(
-                {'patient': self.identifier,
-                'pathway': 'simple_with_branch',
-                'event': 'depart',
+            self.full_event_log.append({
+                'patient': self.identifier,
+                'pathway': 'Shared',
+                'event': 'direct_discharge',
                 'event_type': 'arrival_departure',
-                'time': self.env.now}
-            )
+                'unit': 'discharge',
+                'time': self.env.now
+            })
+
         # total time in system
         self.total_time = self.env.now - self.arrival
-
-
-

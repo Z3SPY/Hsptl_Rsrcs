@@ -1,11 +1,4 @@
-'''
-A Streamlit application based on the open treatment centre simulation model from Monks.T, Harper.A, Anagnoustou. A, Allen.M, Taylor.S. (2022)
 
-Original Model: https://github.com/TomMonks/treatment-centre-sim/tree/main
-
-Allows users to interact with an increasingly complex treatment simulation
-
-'''
 
 import base64
 
@@ -20,7 +13,7 @@ import plotly.graph_objects as go
 import streamlit as st
 import numpy as np
 from helper_functions import add_logo, mermaid, center_running
-from model_classes import Scenario, multiple_replications
+from modelclasses import Scenario, multiple_replications
 from output_animation_functions import reshape_for_animations, generate_animation_df, generate_animation
 
 st.set_page_config(
@@ -215,7 +208,8 @@ with tab1:
                  non_trauma_treat_p=non_trauma_treat_p,
                  prob_trauma=prob_trauma,
                  n_icu=n_icu_beds,       
-                 n_ward=n_ward_beds      
+                 n_ward=n_ward_beds 
+      
             )
 
     # A user must press a streamlit button to run the model
@@ -357,14 +351,14 @@ with tab1:
                  'x':  290, 'y': 65, 'resource':'n_reg', 'label':'Being<br>Registered'  },
 
                 {'event': 'MINORS_examination_wait_begins',
-                 'x':  460, 'y': 125, 'label': "Waiting for<br>Examination"  },
+                 'x':  500, 'y': 125, 'label': "Waiting for<br>Examination"  },
                 {'event': 'MINORS_examination_begins',
-                 'x':  460, 'y': 65, 'resource':'n_exam', 'label': "Being<br>Examined" },
+                 'x':  500, 'y': 65, 'resource':'n_exam', 'label': "Being<br>Examined" },
 
                 {'event': 'MINORS_treatment_wait_begins',
-                 'x':  625, 'y': 125, 'label': "Waiting for<br>Treatment"  },
+                 'x':  670, 'y': 125, 'label': "Waiting for<br>Treatment"  },
                 {'event': 'MINORS_treatment_begins',
-                 'x':  625, 'y': 65, 'resource':'n_cubicles_1', 'label': "Being<br>Treated" },
+                 'x':  670, 'y': 65, 'resource':'n_cubicles_1', 'label': "Being<br>Treated" },
 
                 # Trauma pathway
                 {'event': 'TRAUMA_stabilisation_wait_begins',
@@ -373,35 +367,23 @@ with tab1:
                  'x': 290, 'y': 500, 'resource':'n_trauma', 'label': "Being<br>Stabilised" },
 
                 {'event': 'TRAUMA_treatment_wait_begins',
-                 'x': 625, 'y': 560, 'label': "Waiting for<br>Treatment" },
+                 'x': 525, 'y': 560, 'label': "Waiting for<br>Treatment" },
                 {'event': 'TRAUMA_treatment_begins',
-                 'x': 625, 'y': 500, 'resource':'n_cubicles_2', 'label': "Being<br>Treated" },
+                 'x': 525, 'y': 500, 'resource':'n_cubicles_2', 'label': "Being<br>Treated" },
 
 
-                # Post-treatment ward/ICU pathways (shared by trauma and non-trauma)
-                {'event': 'ward_admission',
-                 'x': 800, 'y': -100, 'label': "Admitted to<br>Ward" },
-                {'event': 'ward_discharge',
-                 'x': 800, 'y': -100, 'label': "Leaving<br>Ward" },
+                # Ward
+                {'event': 'ward_admission',         'x': 690, 'y': 530, 'resource': 'n_ward_beds',  'label': "Admitted to<br>Ward"},
+                {'event': 'ward_wait_begins','x': 690, 'y': 590, 'label': "Waiting for<br>Ward"},
 
-                {'event': 'icu_admission',
-                 'x': 800, 'y': -100, 'label': "Admitted to<br>ICU" },
-                {'event': 'icu_discharge',
-                 'x': 800, 'y': -100, 'label': "Leaving<br>ICU" },
-
-                # Optional: Waiting queues before ICU/ward (only if modeled)
-                {'event': 'TRAUMA_ward_wait_begins',
-                 'x': 800, 'y': -100, 'label': "Waiting for<br>Ward Bed" },
-                {'event': 'MINORS_ward_wait_begins',
-                 'x': 800, 'y': -100, 'label': "Waiting for<br>Ward Bed" },
-
-                {'event': 'TRAUMA_icu_wait_begins',
-                 'x': 800, 'y': -100, 'label': "Waiting for<br>ICU Bed" },
-                {'event': 'MINORS_icu_wait_begins',
-                 'x': 800, 'y': -100, 'label': "Waiting for<br>ICU Bed" },
+                # ICU
+                {'event': 'icu_admission',          'x': 690, 'y': 330, 'resource': 'n_icu_beds', 'label': "Admitted to<br>ICU"},
+                {'event': 'icu_wait_begins', 'x': 690, 'y': 390, 'label': "Waiting for<br>ICU"},
 
 
 
+                {'event': 'icu_discharge',          'x': 670, 'y': 330, 'label': "Leaving<br>ICU"},
+                {'event': 'ward_discharge',         'x': 670, 'y': 330, 'label': "Leaving<br>Ward"},
                  {'event': 'exit',
                  'x':  670, 'y': 330, 'label': "Exit"}
             ])
@@ -429,7 +411,7 @@ with tab1:
                 step_snapshot_max=30
                 )
             
-            image_base64 = get_base64_encoded_image("resources/Full Model.png")
+            image_base64 = get_base64_encoded_image("resources/Full Model Background Image - Horizontal Layout.drawio.png")
             background_url = f"data:image/png;base64,{image_base64}"
 
 

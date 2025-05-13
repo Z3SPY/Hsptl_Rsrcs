@@ -199,7 +199,7 @@ class RA_PPO_Agent:
             elapsed = time.time() - start_time
             speed   = self.step_count / elapsed if elapsed > 0 else 0.0
 
-            avg_ret = ep_returns.mean()
+            avg_ret = np.mean(completed_returns) if completed_returns else float('nan')
             self.return_logs.append(avg_ret)
             self.cvar_logs.append(cvar)
             self.step_logs.append(self.step_count)

@@ -14,7 +14,7 @@ import streamlit as st
 
 from output_animation_functions import reshape_for_animations, generate_animation_df, generate_animation
 from helper_functions import add_logo, mermaid, center_running
-from model_classes import Scenario, multiple_replications
+from modelclasses import Scenario, multiple_replications
 
 st.set_page_config(
      page_title="Adding an Optional Step",
@@ -36,13 +36,7 @@ st.subheader("Making Patients Behave Differently: Adding in an Optional Step")
 gc.collect()
 
 # tab1, tab2, tab3 = st.tabs(["Introduction", "Exercise", "Playground"])
-tab3, tab1 = st.tabs(["test", "Playground"])
-
-with tab3:
-
-    st.markdown("""
-               Sampling flows and logic
-                """)
+tab1, tab3= st.tabs(["Playground", "Test"])
 
 
 
@@ -545,3 +539,8 @@ with tab1:
             # Remove remaining objects we've finished with to minimize memory usage
             del results
             gc.collect()
+with tab3:
+
+    st.markdown("""
+               Sampling flows and logic
+                """)
